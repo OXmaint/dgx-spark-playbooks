@@ -42,6 +42,9 @@ from postgres_storage import PostgreSQLConversationStorage
 from utils import process_and_ingest_files_background
 from vector_store import create_vector_store_with_config
 
+from work_order_summarizer import WorkOrderSummarizer
+from work_order_service import WorkOrderService
+
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
 POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", 5432))
 POSTGRES_DB = os.getenv("POSTGRES_DB", "chatbot")
@@ -62,19 +65,53 @@ vector_store = create_vector_store_with_config(config_manager)
 
 vector_store._initialize_store()
 
+work_order_summarizer: WorkOrderSummarizer | None = None
+work_order_service: WorkOrderService | None = None
+
 agent: ChatAgent | None = None
 indexing_tasks: Dict[str, str] = {}
 
 
+# @asynccontextmanager
+# async def lifespan(app: FastAPI):
+#     """Application lifespan manager for startup and shutdown tasks."""
+#     global agent
+#     logger.debug("Initializing PostgreSQL storage and agent...")
+    
+#     try:
+#         await postgres_storage.init_pool()
+#         logger.info("PostgreSQL storage initialized successfully")
+#         logger.debug("Initializing ChatAgent...")
+#         agent = await ChatAgent.create(
+#             vector_store=vector_store,
+#             config_manager=config_manager,
+#             postgres_storage=postgres_storage
+#         )
+#         logger.info("ChatAgent initialized successfully.")
+#     except Exception as e:
+#         logger.error(f"Failed to initialize PostgreSQL storage: {e}")
+#         raise
+
+#     yield
+    
+#     try:
+#         await postgres_storage.close()
+#         logger.debug("PostgreSQL storage closed successfully")
+#     except Exception as e:
+#         logger.error(f"Error closing PostgreSQL storage: {e}")
+
+#modified the above
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown tasks."""
-    global agent
+    global agent, work_order_summarizer, work_order_service
     logger.debug("Initializing PostgreSQL storage and agent...")
     
     try:
         await postgres_storage.init_pool()
         logger.info("PostgreSQL storage initialized successfully")
+        
         logger.debug("Initializing ChatAgent...")
         agent = await ChatAgent.create(
             vector_store=vector_store,
@@ -82,8 +119,22 @@ async def lifespan(app: FastAPI):
             postgres_storage=postgres_storage
         )
         logger.info("ChatAgent initialized successfully.")
+        
+        # Initialize work order services
+        logger.debug("Initializing Work Order Summarizer...")
+        work_order_summarizer = WorkOrderSummarizer(
+            model_host=config_manager.get_selected_model(),
+            model_port=8000
+        )
+        
+        work_order_service = WorkOrderService(
+            vector_store=vector_store,
+            summarizer=work_order_summarizer
+        )
+        logger.info("Work Order Service initialized successfully.")
+        
     except Exception as e:
-        logger.error(f"Failed to initialize PostgreSQL storage: {e}")
+        logger.error(f"Failed to initialize services: {e}")
         raise
 
     yield
@@ -109,6 +160,149 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# endpoints for work order
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for the API."""
+    try:
+        # Check database connection
+        db_healthy = False
+        try:
+            await postgres_storage.init_pool() if not postgres_storage.pool else None
+            db_healthy = postgres_storage.pool is not None
+        except:
+            pass
+        
+        # Check vector store
+        vector_store_healthy = vector_store._store is not None
+        
+        # Check agent
+        agent_healthy = agent is not None
+        
+        # Check work order service
+        work_order_service_healthy = work_order_service is not None
+        
+        overall_healthy = all([
+            db_healthy,
+            vector_store_healthy,
+            agent_healthy,
+            work_order_service_healthy
+        ])
+        
+        return {
+            "status": "healthy" if overall_healthy else "degraded",
+            "components": {
+                "database": "healthy" if db_healthy else "unhealthy",
+                "vector_store": "healthy" if vector_store_healthy else "unhealthy",
+                "agent": "healthy" if agent_healthy else "unhealthy",
+                "work_order_service": "healthy" if work_order_service_healthy else "unhealthy"
+            }
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+
+
+@app.post("/work-orders/process")
+async def process_work_order(work_order: Dict[str, Any]):
+    """Process a work order: LLM generates summary and extracts important metadata.
+    
+    The work order is stored in Milvus vector database with:
+    - Embeddings of the summary for semantic search
+    - LLM-extracted metadata
+    - Original JSON payload
+    
+    Args:
+        work_order: Work order JSON payload (any structure)
+        
+    Returns:
+        Processing result with summary and extracted metadata
+    """
+    try:
+        log_request({"work_order_preview": str(work_order)[:200]}, "/work-orders/process")
+        
+        if not work_order_service:
+            raise HTTPException(
+                status_code=503,
+                detail="Work order service not initialized"
+            )
+        
+        result = await work_order_service.process_work_order(work_order)
+        
+        log_response({
+            "status": result["status"],
+            "metadata_fields_extracted": list(result["metadata"].keys())
+        }, "/work-orders/process")
+        
+        return result
+        
+    except Exception as e:
+        log_error(e, "/work-orders/process")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing work order: {str(e)}"
+        )
+
+
+@app.get("/work-orders/stats")
+async def get_work_order_stats():
+    """Get statistics about stored work orders."""
+    try:
+        if not work_order_service:
+            raise HTTPException(
+                status_code=503,
+                detail="Work order service not initialized"
+            )
+        
+        stats = await work_order_service.get_work_order_stats()
+        return stats
+        
+    except Exception as e:
+        log_error(e, "/work-orders/stats")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error getting work order stats: {str(e)}"
+        )
+
+
+
+@app.get("/work-orders/search")
+async def search_work_orders(query: str, k: int = 5):
+    """Search work orders by similarity to query.
+    
+    Args:
+        query: Search query
+        k: Number of results to return
+        
+    Returns:
+        List of matching work orders
+    """
+    try:
+        log_request({"query": query, "k": k}, "/work-orders/search")
+        
+        if not work_order_service:
+            raise HTTPException(
+                status_code=503,
+                detail="Work order service not initialized"
+            )
+        
+        results = await work_order_service.search_work_orders(query, k)
+        
+        log_response({"result_count": len(results)}, "/work-orders/search")
+        return {"results": results, "count": len(results)}
+        
+    except Exception as e:
+        log_error(e, "/work-orders/search")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error searching work orders: {str(e)}"
+        )
+
+# endpoints for work order ^
 
 
 @app.websocket("/ws/chat/{chat_id}")
