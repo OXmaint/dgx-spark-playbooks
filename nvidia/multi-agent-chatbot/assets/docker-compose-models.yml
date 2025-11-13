@@ -127,30 +127,30 @@ services:
       - "70"
       - "--jinja"
 
-  deepseek-coder:
-    <<: *build-base
-    container_name: deepseek-coder
-    volumes:
-      - ./models:/models
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    command: 
-      - "-m"
-      - "/models/deepseek-coder-6.7b-instruct.Q8_0.gguf"
-      - "--port"
-      - "8000"
-      - "--host"
-      - "0.0.0.0"
-      - "-n"
-      - "256"
-      - "--n-gpu-layers"
-      - "999"
-      - "--jinja"
+#   deepseek-coder:
+#     <<: *build-base
+#     container_name: deepseek-coder
+#     volumes:
+#       - ./models:/models
+#     deploy:
+#       resources:
+#         reservations:
+#           devices:
+#             - driver: nvidia
+#               count: all
+#               capabilities: [gpu]
+#     command: 
+#       - "-m"
+#       - "/models/deepseek-coder-6.7b-instruct.Q8_0.gguf"
+#       - "--port"
+#       - "8000"
+#       - "--host"
+#       - "0.0.0.0"
+#       - "-n"
+#       - "256"
+#       - "--n-gpu-layers"
+#       - "999"
+#       - "--jinja"
 
 volumes:
   ollama-data:
