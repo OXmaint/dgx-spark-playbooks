@@ -174,6 +174,7 @@ interface QuerySectionProps {
 interface Message {
   type: "HumanMessage" | "AssistantMessage" | "ToolMessage";
   content: string;
+  image?: string; // Optional base64 image data
 }
 
 
@@ -251,7 +252,7 @@ export default function QuerySection({
           const msg = JSON.parse(event.data);
           const type = msg.type
           const text = msg.data ?? msg.token ?? "";
-        
+
           switch (type) {
             case "history": {
               console.log('history messages: ', msg.messages);
@@ -269,6 +270,31 @@ export default function QuerySection({
               break;
             }
             case "token": {
+              // Check if this is a final_response object with image data
+              if (typeof text === "object" && text.type === "final_response") {
+                setResponse(prev => {
+                  try {
+                    const messages = JSON.parse(prev);
+                    const last = messages[messages.length - 1];
+                    if (last && last.type === "AssistantMessage") {
+                      last.content = text.text || "";
+                      last.image = text.image;
+                    } else {
+                      messages.push({
+                        type: "AssistantMessage",
+                        content: text.text || "",
+                        image: text.image
+                      });
+                    }
+                    return JSON.stringify(messages);
+                  } catch {
+                    return prev;
+                  }
+                });
+                setIsStreaming(false);
+                break;
+              }
+
               if (!text) break;
               if (!firstTokenReceived.current) {
                 firstTokenReceived.current = true;
@@ -295,7 +321,7 @@ export default function QuerySection({
                 setGraphStatus("Thinking...");
               }
               break;
-            } 
+            }
             case "tool_start": {
               console.log(type, msg.data);
               setGraphStatus(`calling tool: ${msg?.data}`);
@@ -586,6 +612,15 @@ export default function QuerySection({
                   {message.content}
                 </ReactMarkdown>
               </div>
+              {message.image && (
+                <div className={styles.annotatedImageContainer}>
+                  <img
+                    src={message.image}
+                    alt="Annotated result"
+                    className={styles.annotatedImage}
+                  />
+                </div>
+              )}
             </div>
             </div>
           );
