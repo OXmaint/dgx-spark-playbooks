@@ -538,7 +538,7 @@ export default function QuerySection({
     try {
       const parsed = JSON.parse(response);
       if (!Array.isArray(parsed)) return [];
-  
+
       return parsed
         .map((msg: any): Message => ({
           type: msg?.type === "HumanMessage"
@@ -546,7 +546,8 @@ export default function QuerySection({
             : msg?.type === "ToolMessage"
             ? "ToolMessage"
             : "AssistantMessage",
-          content: typeof msg?.content === "string" ? msg.content : String(msg?.content ?? "")
+          content: typeof msg?.content === "string" ? msg.content : String(msg?.content ?? ""),
+          image: msg?.image // Include the image field
         }))
         .filter((msg) => msg.type !== "ToolMessage"); // discard ToolMessage completely
     } catch {
@@ -575,8 +576,9 @@ export default function QuerySection({
         {parseMessages(response).map((message, index) => {
           const isHuman = message.type === "HumanMessage";
           const key = `${message.type}-${index}`;
-          
-          if (!message.content?.trim()) return null;
+
+          // Skip empty messages unless they have an image
+          if (!message.content?.trim() && !message.image) return null;
           
           return (
             <div 
@@ -588,30 +590,32 @@ export default function QuerySection({
             >
 
             <div className={`${styles.message} ${isHuman ? styles.userMessage : styles.assistantMessage}`}>
-              <div className={styles.markdown}>
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  components={{
-                    code({ inline, className, children, ...props }) {
-                      const match = /language-(\w+)/.exec(className || "");
-                      const code = String(children ?? "").replace(/\n$/, "");
+              {message.content && (
+                <div className={styles.markdown}>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      code({ inline, className, children, ...props }) {
+                        const match = /language-(\w+)/.exec(className || "");
+                        const code = String(children ?? "").replace(/\n$/, "");
 
-                      if (inline || !match) {
+                        if (inline || !match) {
+                          return (
+                            <code className={className} {...props}>
+                              {code}
+                            </code>
+                          );
+                        }
                         return (
-                          <code className={className} {...props}>
-                            {code}
-                          </code>
+                          <CodeBlockWithCopy code={code} language={match[1]} />
                         );
-                      }
-                      return (
-                        <CodeBlockWithCopy code={code} language={match[1]} />
-                      );
-                    },
-                  }}
-                >
-                  {message.content}
-                </ReactMarkdown>
-              </div>
+                      },
+                    }}
+                  >
+                    {message.content}
+                  </ReactMarkdown>
+                </div>
+              )}
               {message.image && (
                 <div className={styles.annotatedImageContainer}>
                   <img
