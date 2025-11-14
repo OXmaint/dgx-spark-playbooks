@@ -44,6 +44,7 @@ class State(TypedDict, total=False):
     messages: List[AnyMessage]
     chat_id: Optional[str]
     image_data: Optional[str]
+    annotated_image: Optional[str]
 
 
 class ChatAgent:
@@ -239,8 +240,18 @@ class ChatAgent:
                     logger.info(f'Executing tool {tool_call["name"]} with args: {tool_args}')
                     tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(tool_args)
                     state["process_image_used"] = True
+                elif tool_call["name"] == "annotate_image":
+                    tool_args = tool_call["args"].copy()
+                    # If image data is in state, use it
+                    if state.get("image_data") and not tool_args.get("image"):
+                        tool_args["image"] = state["image_data"]
+                    logger.info(f'Executing tool {tool_call["name"]} with args: {tool_args}')
+                    tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(tool_args)
+                    # Store the annotated image in state
+                    state["annotated_image"] = tool_result
                 else:
                     tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(tool_call["args"])
+
                 if "code" in tool_call["name"]:
                     content = str(tool_result)
                 elif isinstance(tool_result, str):
@@ -334,7 +345,7 @@ class ChatAgent:
             "raw_output_length": len(raw_output),
             "raw_output": raw_output[:200] + "..." if len(raw_output) > 200 else raw_output
         })
-        
+
         response = AIMessage(
             content=raw_output,
             **({"tool_calls": tool_calls} if tool_calls else {})
@@ -498,7 +509,8 @@ class ChatAgent:
                 "chat_id": chat_id,
                 "messages": messages_to_process,
                 "image_data": image_data if image_data else None,
-                "process_image_used": False
+                "process_image_used": False,
+                "annotated_image": None
             }
             
 
@@ -581,6 +593,15 @@ class ChatAgent:
 
                     content = getattr(final_msg, "content", None)
                     if content:
-                        await token_q.put(content)
+                        # Check if we have an annotated image to send separately
+                        if self.last_state.get("annotated_image"):
+                            response_data = {
+                                "type": "final_response",
+                                "text": content,
+                                "image": self.last_state["annotated_image"]
+                            }
+                            await token_q.put(response_data)
+                        else:
+                            await token_q.put(content)
             finally:
                 await token_q.put(SENTINEL)

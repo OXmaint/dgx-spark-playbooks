@@ -151,7 +151,7 @@
   margin-bottom: 8px;
   align-items: flex-start;
   width: 100%;
-  max-width: 800px;
+  max-width: 75vw;
   margin-left: auto;
   margin-right: auto;
   opacity: 0;
@@ -359,7 +359,7 @@
   animation: messageAppear 0.8s ease forwards;
   animation-delay: 0.8s;
   transition: all 0.3s ease;
-  gap: 12px;
+  gap: 0;
 }
 
 :global(.dark) .inputContainer {
@@ -372,12 +372,12 @@
   display: flex;
   align-items: center;
   width: 100%;
-  max-width: 600px;
+  max-width: 75vw;
 }
 
 .messageInput {
   width: 100%;
-  max-width: 600px;
+  max-width: 75vw;
   padding: 12px 50px 12px 16px;
   border: 1px solid #e2e8f0;
   border-radius: 20px;
@@ -451,13 +451,12 @@
   border: none;
   cursor: pointer;
   color: white;
-  position: absolute;
-  right: calc(50% - 280px);
-  top: 50%;
-  transform: translateY(-50%);
+  position: relative;
   opacity: 0;
   visibility: hidden;
   padding: 0;
+  flex-shrink: 0;
+  margin-left: 8px;
 }
 
 /* Quick appear animation for all button shows */
@@ -465,16 +464,14 @@
   from {
     opacity: 0;
     visibility: hidden;
-    transform: translateY(-30%);
   }
   to {
     opacity: 1;
     visibility: visible;
-    transform: translateY(-50%);
   }
 }
 
-.sendButton.show, .streamingCancelButton.show {
+.sendButton.show, .streamingCancelButton.show, .clipButton.show {
   animation: buttonAppear 0.3s ease forwards;
 }
 
@@ -932,7 +929,7 @@
   color: #6b7280;
   padding: 2px 16px;
   margin: -12px auto 0 auto;
-  max-width: 600px;
+  max-width: 75vw;
   line-height: 1.4;
   opacity: 0.8;
   transition: color 0.3s ease;
@@ -958,5 +955,120 @@
 
 :global(.dark) .warning {
   color: #fbbf24;
+}
+
+/* Clip button for image upload */
+.clipButton {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  cursor: pointer;
+  color: white;
+  background-color: #4b5563;
+  position: relative;
+  opacity: 0;
+  visibility: hidden;
+  padding: 0;
+  flex-shrink: 0;
+  margin-left: 8px;
+  transition: background-color 0.2s;
+}
+
+.clipButton:hover {
+  background-color: #6b7280;
+}
+
+:global(.dark) .clipButton {
+  background-color: #374151;
+}
+
+:global(.dark) .clipButton:hover {
+  background-color: #4b5563;
+}
+
+/* Image upload modal */
+.imageUploadOverlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  z-index: 100;
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.imageUploadModal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 101;
+  background: white;
+  padding: 32px;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  max-width: 500px;
+  width: 90%;
+  animation: slideIn 0.3s ease;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -48%);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%);
+  }
+}
+
+:global(.dark) .imageUploadModal {
+  background: #1f2937;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.closeImageUploadButton {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: none;
+  border: none;
+  font-size: 28px;
+  cursor: pointer;
+  color: #718096;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  transition: background-color 0.2s;
+}
+
+.closeImageUploadButton:hover {
+  background-color: rgba(0, 0, 0, 0.05);
+}
+
+:global(.dark) .closeImageUploadButton {
+  color: #9ca3af;
+}
+
+:global(.dark) .closeImageUploadButton:hover {
+  background-color: rgba(255, 255, 255, 0.05);
 }
 

@@ -31,6 +31,8 @@ export default function Home() {
   const [showIngestion, setShowIngestion] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  const [uploadedImage, setUploadedImage] = useState<File | null>(null);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   // Load initial chat ID
@@ -102,6 +104,10 @@ export default function Home() {
           abortControllerRef={abortControllerRef}
           setShowIngestion={setShowIngestion}
           currentChatId={currentChatId}
+          uploadedImage={uploadedImage}
+          setUploadedImage={setUploadedImage}
+          isUploadingImage={isUploadingImage}
+          setIsUploadingImage={setIsUploadingImage}
         />
       </div>
 

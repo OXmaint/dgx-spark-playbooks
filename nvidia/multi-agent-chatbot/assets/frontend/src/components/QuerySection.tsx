@@ -22,6 +22,7 @@ import remarkGfm from 'remark-gfm'; // NEW
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter"; // NEW
 import { oneDark, oneLight, Dark, Light } from "react-syntax-highlighter/dist/esm/styles/prism"; // NEW
 import WelcomeSection from "./WelcomeSection";
+import ImageUpload from "./ImageUpload";
 
 export function makeChatTheme(isDark: boolean) {
   const base = isDark ? oneDark : oneLight;
@@ -164,6 +165,10 @@ interface QuerySectionProps {
   abortControllerRef: React.RefObject<AbortController | null>;
   setShowIngestion: (value: boolean) => void;
   currentChatId: string | null;
+  uploadedImage: File | null;
+  setUploadedImage: (file: File | null) => void;
+  isUploadingImage: boolean;
+  setIsUploadingImage: (value: boolean) => void;
 }
 
 interface Message {
@@ -183,6 +188,10 @@ export default function QuerySection({
   abortControllerRef,
   setShowIngestion,
   currentChatId,
+  uploadedImage,
+  setUploadedImage,
+  isUploadingImage,
+  setIsUploadingImage,
 }: QuerySectionProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -198,6 +207,7 @@ export default function QuerySection({
   const firstTokenReceived = useRef(false);
   const hasAssistantContent = useRef(false);
   const fadeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const [showImageUpload, setShowImageUpload] = useState(false);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -467,6 +477,36 @@ export default function QuerySection({
     }
   };
 
+  const handleImageUpload = async (file: File) => {
+    try {
+      setIsUploadingImage(true);
+
+      const formData = new FormData();
+      formData.append('image', file);
+
+      const response = await fetch('/api/upload-image', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to upload image');
+      }
+
+      const data = await response.json();
+      console.log('Image uploaded successfully:', data);
+
+      setUploadedImage(file);
+      setShowImageUpload(false); // Close the modal after successful upload
+    } catch (error) {
+      console.error('Error uploading image:', error);
+      alert('Failed to upload image. Please try again.');
+      setUploadedImage(null);
+    } finally {
+      setIsUploadingImage(false);
+    }
+  };
+
   // filter out all ToolMessages
   const parseMessages = (response: string): Message[] => {
     try {
@@ -587,24 +627,62 @@ export default function QuerySection({
             }}
           />
         </div>
+        <button
+          type="button"
+          onClick={() => setShowImageUpload(!showImageUpload)}
+          className={`${styles.clipButton} ${showButtons ? styles.show : ''}`}
+          title="Upload image"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            width="20"
+            height="20"
+          >
+            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+          </svg>
+        </button>
         {!isStreaming ? (
-          <button 
-            type="submit" 
+          <button
+            type="submit"
             className={`${styles.sendButton} ${showButtons ? styles.show : ''}`}
             disabled={!query.trim()}
           >
             →
           </button>
         ) : (
-          <button 
-            type="button" 
-            onClick={handleCancelStream} 
+          <button
+            type="button"
+            onClick={handleCancelStream}
             className={`${styles.streamingCancelButton} ${showButtons ? styles.show : ''}`}
           >
             ✕
           </button>
         )}
       </form>
+
+      {showImageUpload && (
+        <>
+          <div className={styles.imageUploadOverlay} onClick={() => setShowImageUpload(false)} />
+          <div className={styles.imageUploadModal}>
+            <button
+              className={styles.closeImageUploadButton}
+              onClick={() => setShowImageUpload(false)}
+            >
+              ×
+            </button>
+            <ImageUpload
+              onImageUpload={handleImageUpload}
+              isUploading={isUploadingImage}
+            />
+          </div>
+        </>
+      )}
       
       <div className={styles.disclaimer}>
         This is a concept demo to showcase multiple models and MCP use. It is not optimized for performance. Developers can customize and further optimize it for performance.
