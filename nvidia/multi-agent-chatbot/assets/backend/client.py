@@ -47,11 +47,11 @@ class MCPClient:
                 "args": ["tools/python_sandbox.py"],
                 "transport": "stdio",
             },
-            "code-generation-server": {
-                "command": "python",
-                "args": ["tools/mcp_servers/code_generation.py"],
-                "transport": "stdio",
-            },
+            # "code-generation-server": {
+            #     "command": "python",
+            #     "args": ["tools/mcp_servers/code_generation.py"],
+            #     "transport": "stdio",
+            # },
             "rag-server": {
                 "command": "python",
                 "args": ["tools/mcp_servers/rag.py"],
