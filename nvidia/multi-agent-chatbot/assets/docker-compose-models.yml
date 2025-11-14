@@ -21,11 +21,13 @@ x-build-base: &build-base
   image: local/llama.cpp:server-cuda
 
 services:
-  qwen2.5-vl:
-    image: nvcr.io/nvidia/tensorrt-llm/release:spark-single-gpu-dev
-    container_name: qwen2.5-vl
-    shm_size: '1g'
+  # Option 1: Qwen3-VL with vLLM (ARM64 compatible, recommended for Grace Blackwell)
+  qwen3-vl:
+    image: vllm/vllm-openai:latest
+    container_name: qwen3-vl
+    shm_size: '16g'
     restart: unless-stopped
+    platform: linux/arm64
     deploy:
       resources:
         reservations:
@@ -34,24 +36,55 @@ services:
               count: all
               capabilities: [gpu]
     environment:
-      - TOKENIZERS_PARALLELISM=false
-      - NCCL_P2P_LEVEL=SYS
-      - NCCL_DEBUG=INFO
-      - UCX_TLS=tcp,sm,self
-      - UCX_MEMTYPE_CACHE=n
       - CUDA_VISIBLE_DEVICES=0
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
     command: >
-      trtllm-serve serve Qwen/Qwen2-VL-7B-Instruct
-      --backend pytorch
+      --model Qwen/Qwen3-VL-7B-Instruct
       --host 0.0.0.0
       --port 8000
-      --trust_remote_code
+      --trust-remote-code
+      --max-model-len 8192
+      --dtype bfloat16
+      --gpu-memory-utilization 0.95
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 120s
+
+  # Option 2: Qwen2.5-VL with TensorRT-LLM (fallback if Qwen3-VL doesn't work)
+  # qwen2.5-vl:
+  #   image: nvcr.io/nvidia/tensorrt-llm/release:spark-single-gpu-dev
+  #   container_name: qwen2.5-vl
+  #   shm_size: '1g'
+  #   restart: unless-stopped
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
+  #   environment:
+  #     - TOKENIZERS_PARALLELISM=false
+  #     - NCCL_P2P_LEVEL=SYS
+  #     - NCCL_DEBUG=INFO
+  #     - UCX_TLS=tcp,sm,self
+  #     - UCX_MEMTYPE_CACHE=n
+  #     - CUDA_VISIBLE_DEVICES=0
+  #   command: >
+  #     trtllm-serve serve Qwen/Qwen2.5-VL-7B-Instruct
+  #     --backend pytorch
+  #     --host 0.0.0.0
+  #     --port 8000
+  #     --trust_remote_code
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 5
+  #     start_period: 60s
       
   qwen3-embedding:
     <<: *build-base
