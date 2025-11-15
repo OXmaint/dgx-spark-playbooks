@@ -30,6 +30,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict
+from typing import Any
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,6 +45,10 @@ from vector_store import create_vector_store_with_config
 
 from work_order_summarizer import WorkOrderSummarizer
 from work_order_service import WorkOrderService
+
+from pymilvus import connections, Collection
+import json as _json
+
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
 POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", 5432))
@@ -301,6 +306,93 @@ async def search_work_orders(query: str, k: int = 5):
             status_code=500,
             detail=f"Error searching work orders: {str(e)}"
         )
+
+@app.get("/work-orders/by-id/{wo_id}")
+async def get_work_order_by_id(wo_id: str):
+    """
+    Fetch the stored summary + metadata + raw JSON for a given work order id.
+    """
+    try:
+        # connect to Milvus
+        try:
+            connections.connect(host="milvus", port="19530")
+        except Exception:
+            connections.connect(uri="http://milvus:19530")
+
+        col = Collection("context")
+        col.load()
+
+        rows = col.query(
+            expr=f'id == "{wo_id}"',
+            output_fields=["pk","id","source","text","raw_work_order"],
+            limit=10
+        )
+
+        # Shape a friendly response (parse raw JSON if present)
+        payload = []
+        for r in rows:
+            item = {
+                "pk": r.get("pk"),
+                "id": r.get("id"),
+                "source": r.get("source"),
+                "summary_text": r.get("text"),
+                "raw_work_order": None
+            }
+            raw = r.get("raw_work_order")
+            if isinstance(raw, str):
+                try:
+                    item["raw_work_order"] = json.loads(raw)
+                except Exception:
+                    item["raw_work_order"] = raw
+            payload.append(item)
+
+        connections.disconnect("default")
+        return {"count": len(payload), "rows": payload}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching work order: {e}")
+
+
+@app.get("/work-orders/by-number/{wo_number}")
+async def get_work_order_by_number(wo_number: str):
+    try:
+        try:
+            connections.connect(host="milvus", port="19530")
+        except Exception:
+            connections.connect(uri="http://milvus:19530")
+
+        col = Collection("context"); col.load()
+        rows = col.query(
+            expr=f'work_order_number == "{wo_number}"',
+            output_fields=["pk","id","work_order_number","source","text","raw_work_order","chunk_index","chunk_total"],
+            limit=1000
+        )
+
+        out = []
+        for r in rows:
+            item = {
+                "pk": r.get("pk"),
+                "id": r.get("id"),
+                "work_order_number": r.get("work_order_number"),
+                "source": r.get("source"),
+                "chunk_index": r.get("chunk_index"),
+                "chunk_total": r.get("chunk_total"),
+                "summary_text": r.get("text"),
+                "raw_work_order": None
+            }
+            raw = r.get("raw_work_order")
+            if isinstance(raw, str):
+                try:
+                    item["raw_work_order"] = _json.loads(raw)
+                except Exception:
+                    item["raw_work_order"] = raw
+            out.append(item)
+
+        connections.disconnect("default")
+        return {"count": len(out), "rows": out}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching work order: {e}")
+
 
 # endpoints for work order ^
 

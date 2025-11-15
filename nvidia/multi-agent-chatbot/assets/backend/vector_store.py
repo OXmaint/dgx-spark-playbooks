@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 from logger import logger
 from typing import Optional, Callable
 import requests
+from pymilvus import connections, Collection
 
 
 class CustomEmbeddings:
@@ -58,311 +59,514 @@ class CustomEmbeddings:
         return self.__call__([text])[0]
 
 
+# class VectorStore:
+#     """Vector store for document embedding and retrieval.
+    
+#     Decoupled from ConfigManager - uses optional callbacks for source management.
+#     """
+    
+#     def __init__(
+#         self, 
+#         embeddings=None, 
+#         uri: str = "http://milvus:19530",
+#         on_source_deleted: Optional[Callable[[str], None]] = None
+#     ):
+#         """Initialize the vector store.
+        
+#         Args:
+#             embeddings: Embedding model to use (defaults to OllamaEmbeddings)
+#             uri: Milvus connection URI
+#             on_source_deleted: Optional callback when a source is deleted
+#         """
+#         try:
+#             self.embeddings = embeddings or CustomEmbeddings(model="qwen3-embedding-custom")
+#             self.uri = uri
+#             self.on_source_deleted = on_source_deleted
+#             self._initialize_store()
+            
+#             self.text_splitter = RecursiveCharacterTextSplitter(
+#                 chunk_size=1000,
+#                 chunk_overlap=200
+#             )
+            
+#             logger.debug({
+#                 "message": "VectorStore initialized successfully"
+#             })
+#         except Exception as e:
+#             logger.error({
+#                 "message": "Error initializing VectorStore",
+#                 "error": str(e)
+#             }, exc_info=True)
+#             raise
+    
+#     def _initialize_store(self):
+#         self._store = Milvus(
+#             embedding_function=self.embeddings,
+#             collection_name="context",
+#             connection_args={"uri": self.uri},
+#             auto_id=True
+#         )
+#         logger.debug({
+#             "message": "Milvus vector store initialized",
+#             "uri": self.uri,
+#             "collection": "context"
+#         })
+
+#     def _load_documents(self, file_paths: List[str] = None, input_dir: str = None) -> List[str]:
+#         try:
+#             documents = []
+#             source_name = None
+            
+#             if input_dir:
+#                 source_name = os.path.basename(os.path.normpath(input_dir))
+#                 logger.debug({
+#                     "message": "Loading files from directory",
+#                     "directory": input_dir,
+#                     "source": source_name
+#                 })
+#                 file_paths = glob.glob(os.path.join(input_dir, "**"), recursive=True)
+#                 file_paths = [f for f in file_paths if os.path.isfile(f)]
+            
+#             logger.info(f"Processing {len(file_paths)} files: {file_paths}")
+            
+#             for file_path in file_paths:
+#                 try:
+#                     if not source_name:
+#                         source_name = os.path.basename(file_path)
+#                         logger.info(f"Using filename as source: {source_name}")
+                    
+#                     logger.info(f"Loading file: {file_path}")
+                    
+#                     file_ext = os.path.splitext(file_path)[1].lower()
+#                     logger.info(f"File extension: {file_ext}")
+                    
+#                     try:
+#                         loader = UnstructuredLoader(file_path)
+#                         docs = loader.load()
+#                         logger.info(f"Successfully loaded {len(docs)} documents from {file_path}")
+#                     except Exception as pdf_error:
+#                         logger.error(f'error with unstructured loader, trying to load from scratch')
+#                         file_text = None
+#                         if file_ext == ".pdf":
+#                             logger.info("Attempting PyPDF text extraction fallback")
+#                             try:
+#                                 from pypdf import PdfReader
+#                                 reader = PdfReader(file_path)
+#                                 extracted_pages = []
+#                                 for page in reader.pages:
+#                                     try:
+#                                         extracted_pages.append(page.extract_text() or "")
+#                                     except Exception as per_page_err:
+#                                         logger.info(f"Warning: failed to extract a page: {per_page_err}")
+#                                         extracted_pages.append("")
+#                                 file_text = "\n\n".join(extracted_pages).strip()
+#                             except Exception as pypdf_error:
+#                                 logger.info(f"PyPDF fallback failed: {pypdf_error}")
+#                                 file_text = None
+
+#                         if not file_text:
+#                             logger.info("Falling back to raw text read of file contents")
+#                             try:
+#                                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+#                                     file_text = f.read()
+#                             except Exception as read_error:
+#                                 logger.info(f"Fallback read failed: {read_error}")
+#                                 file_text = ""
+
+#                         if file_text and file_text.strip():
+#                             docs = [Document(
+#                                 page_content=file_text,
+#                                 metadata={
+#                                     "source": source_name,
+#                                     "file_path": file_path,
+#                                     "filename": os.path.basename(file_path),
+#                                 }
+#                             )]
+#                         else:
+#                             logger.info("Creating a simple document as fallback (no text extracted)")
+#                             docs = [Document(
+#                                 page_content=f"Document: {os.path.basename(file_path)}",
+#                                 metadata={
+#                                     "source": source_name,
+#                                     "file_path": file_path,
+#                                     "filename": os.path.basename(file_path),
+#                                 }
+#                             )]
+                    
+#                     for doc in docs:
+#                         if not doc.metadata:
+#                             doc.metadata = {}
+                        
+#                         cleaned_metadata = {}
+#                         cleaned_metadata["source"] = source_name
+#                         cleaned_metadata["file_path"] = file_path
+#                         cleaned_metadata["filename"] = os.path.basename(file_path)
+                        
+#                         for key, value in doc.metadata.items():
+#                             if key not in ["source", "file_path"]:
+#                                 if isinstance(value, (list, dict, set)):
+#                                     cleaned_metadata[key] = str(value)
+#                                 elif value is not None:
+#                                     cleaned_metadata[key] = str(value)
+                        
+#                         doc.metadata = cleaned_metadata
+#                     documents.extend(docs)
+#                     logger.debug({
+#                         "message": "Loaded documents from file",
+#                         "file_path": file_path,
+#                         "document_count": len(docs)
+#                     })
+#                 except Exception as e:
+#                     logger.error({
+#                         "message": "Error loading file",
+#                         "file_path": file_path,
+#                         "error": str(e)
+#                     }, exc_info=True)
+#                     continue
+
+#             logger.info(f"Total documents loaded: {len(documents)}")
+#             return documents
+            
+#         except Exception as e:
+#             logger.error({
+#                 "message": "Error loading documents",
+#                 "error": str(e)
+#             }, exc_info=True)
+#             raise
+
+#     def index_documents(self, documents: List[Document]) -> List[Document]:
+#         try:
+#             logger.debug({
+#                 "message": "Starting document indexing",
+#                 "document_count": len(documents)
+#             })
+            
+#             splits = self.text_splitter.split_documents(documents)
+#             logger.debug({
+#                 "message": "Split documents into chunks",
+#                 "chunk_count": len(splits)
+#             })
+            
+#             self._store.add_documents(splits)
+#             self.flush_store()
+            
+#             logger.debug({
+#                 "message": "Document indexing completed"
+#             })            
+#         except Exception as e:
+#             logger.error({
+#                 "message": "Error during document indexing",
+#                 "error": str(e)
+#             }, exc_info=True)
+#             raise
+
+#     def flush_store(self):
+#         """
+#         Flush the Milvus collection to ensure that all added documents are persisted to disk.
+#         """
+#         try:
+#             from pymilvus import connections
+            
+#             connections.connect(uri=self.uri)
+            
+
+#             from pymilvus import utility
+#             utility.flush_all()
+            
+#             logger.debug({
+#                 "message": "Milvus store flushed (persisted to disk)"
+#             })
+#         except Exception as e:
+#             logger.error({
+#                 "message": "Error flushing Milvus store",
+#                 "error": str(e)
+#             }, exc_info=True)
+
+
+#     def get_documents(self, query: str, k: int = 8, sources: List[str] = None) -> List[Document]:
+#         """
+#         Get relevant documents using the retriever's invoke method.
+#         """
+#         try:
+#             search_kwargs = {"k": k}
+            
+#             if sources:
+#                 if len(sources) == 1:
+#                     filter_expr = f'source == "{sources[0]}"'
+#                 else:
+#                     source_conditions = [f'source == "{source}"' for source in sources]
+#                     filter_expr = " || ".join(source_conditions)
+                
+#                 search_kwargs["expr"] = filter_expr
+#                 logger.debug({
+#                     "message": "Retrieving with filter",
+#                     "filter": filter_expr
+#                 })
+            
+#             retriever = self._store.as_retriever(
+#                 search_type="similarity",
+#                 search_kwargs=search_kwargs
+#             )
+            
+#             docs = retriever.invoke(query)
+#             logger.debug({
+#                 "message": "Retrieved documents",
+#                 "query": query,
+#                 "document_count": len(docs)
+#             })
+            
+#             return docs
+#         except Exception as e:
+#             logger.error({
+#                 "message": "Error retrieving documents",
+#                 "error": str(e)
+#             }, exc_info=True)
+#             return []
+
+#     def delete_collection(self, collection_name: str) -> bool:
+#         """
+#         Delete a collection from Milvus.
+        
+#         Args:
+#             collection_name: Name of the collection to delete
+            
+#         Returns:
+#             bool: True if successful, False otherwise
+#         """
+#         try:
+#             from pymilvus import connections, Collection, utility
+            
+#             connections.connect(uri=self.uri)
+            
+#             if utility.has_collection(collection_name):
+#                 collection = Collection(name=collection_name)
+                
+#                 collection.drop()
+                
+#                 if self.on_source_deleted:
+#                     self.on_source_deleted(collection_name)
+                
+#                 logger.debug({
+#                     "message": "Collection deleted successfully",
+#                     "collection_name": collection_name
+#                 })
+#                 return True
+#             else:
+#                 logger.warning({
+#                     "message": "Collection not found",
+#                     "collection_name": collection_name
+#                 })
+#                 return False
+#         except Exception as e:
+#             logger.error({
+#                 "message": "Error deleting collection",
+#                 "collection_name": collection_name,
+#                 "error": str(e)
+#             }, exc_info=True)
+#             return False
+
+
 class VectorStore:
     """Vector store for document embedding and retrieval.
-    
-    Decoupled from ConfigManager - uses optional callbacks for source management.
+
+    Option A modification:
+      •  Supports upsert-by-id (auto-delete existing rows)
+      •  Allows disabling chunking (one row per work order)
     """
-    
+
     def __init__(
-        self, 
-        embeddings=None, 
+        self,
+        embeddings=None,
         uri: str = "http://milvus:19530",
-        on_source_deleted: Optional[Callable[[str], None]] = None
+        on_source_deleted: Optional[Callable[[str], None]] = None,
     ):
-        """Initialize the vector store.
-        
-        Args:
-            embeddings: Embedding model to use (defaults to OllamaEmbeddings)
-            uri: Milvus connection URI
-            on_source_deleted: Optional callback when a source is deleted
-        """
         try:
             self.embeddings = embeddings or CustomEmbeddings(model="qwen3-embedding-custom")
             self.uri = uri
             self.on_source_deleted = on_source_deleted
             self._initialize_store()
-            
+
+            # keep the splitter for document ingestion (not used for work orders)
             self.text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
-                chunk_overlap=200
+                chunk_size=1000, chunk_overlap=200
             )
-            
-            logger.debug({
-                "message": "VectorStore initialized successfully"
-            })
+
+            logger.debug({"message": "VectorStore initialized successfully"})
         except Exception as e:
-            logger.error({
-                "message": "Error initializing VectorStore",
-                "error": str(e)
-            }, exc_info=True)
+            logger.error(
+                {"message": "Error initializing VectorStore", "error": str(e)}, exc_info=True
+            )
             raise
-    
+
+    # ---------------------------------------------------------------------- #
+    #   Core store setup / connection
+    # ---------------------------------------------------------------------- #
     def _initialize_store(self):
         self._store = Milvus(
             embedding_function=self.embeddings,
             collection_name="context",
             connection_args={"uri": self.uri},
-            auto_id=True
+            auto_id=True,
         )
-        logger.debug({
-            "message": "Milvus vector store initialized",
-            "uri": self.uri,
-            "collection": "context"
-        })
+        logger.debug(
+            {
+                "message": "Milvus vector store initialized",
+                "uri": self.uri,
+                "collection": "context",
+            }
+        )
 
-    def _load_documents(self, file_paths: List[str] = None, input_dir: str = None) -> List[str]:
+    # ---------------------------------------------------------------------- #
+    #   Internal helpers
+    # ---------------------------------------------------------------------- #
+    def _predelete_ids(self, ids: set[str]):
+        """Delete any existing rows for these logical ids."""
+        if not ids:
+            return
         try:
-            documents = []
-            source_name = None
-            
-            if input_dir:
-                source_name = os.path.basename(os.path.normpath(input_dir))
-                logger.debug({
-                    "message": "Loading files from directory",
-                    "directory": input_dir,
-                    "source": source_name
-                })
-                file_paths = glob.glob(os.path.join(input_dir, "**"), recursive=True)
-                file_paths = [f for f in file_paths if os.path.isfile(f)]
-            
-            logger.info(f"Processing {len(file_paths)} files: {file_paths}")
-            
-            for file_path in file_paths:
-                try:
-                    if not source_name:
-                        source_name = os.path.basename(file_path)
-                        logger.info(f"Using filename as source: {source_name}")
-                    
-                    logger.info(f"Loading file: {file_path}")
-                    
-                    file_ext = os.path.splitext(file_path)[1].lower()
-                    logger.info(f"File extension: {file_ext}")
-                    
-                    try:
-                        loader = UnstructuredLoader(file_path)
-                        docs = loader.load()
-                        logger.info(f"Successfully loaded {len(docs)} documents from {file_path}")
-                    except Exception as pdf_error:
-                        logger.error(f'error with unstructured loader, trying to load from scratch')
-                        file_text = None
-                        if file_ext == ".pdf":
-                            logger.info("Attempting PyPDF text extraction fallback")
-                            try:
-                                from pypdf import PdfReader
-                                reader = PdfReader(file_path)
-                                extracted_pages = []
-                                for page in reader.pages:
-                                    try:
-                                        extracted_pages.append(page.extract_text() or "")
-                                    except Exception as per_page_err:
-                                        logger.info(f"Warning: failed to extract a page: {per_page_err}")
-                                        extracted_pages.append("")
-                                file_text = "\n\n".join(extracted_pages).strip()
-                            except Exception as pypdf_error:
-                                logger.info(f"PyPDF fallback failed: {pypdf_error}")
-                                file_text = None
-
-                        if not file_text:
-                            logger.info("Falling back to raw text read of file contents")
-                            try:
-                                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                                    file_text = f.read()
-                            except Exception as read_error:
-                                logger.info(f"Fallback read failed: {read_error}")
-                                file_text = ""
-
-                        if file_text and file_text.strip():
-                            docs = [Document(
-                                page_content=file_text,
-                                metadata={
-                                    "source": source_name,
-                                    "file_path": file_path,
-                                    "filename": os.path.basename(file_path),
-                                }
-                            )]
-                        else:
-                            logger.info("Creating a simple document as fallback (no text extracted)")
-                            docs = [Document(
-                                page_content=f"Document: {os.path.basename(file_path)}",
-                                metadata={
-                                    "source": source_name,
-                                    "file_path": file_path,
-                                    "filename": os.path.basename(file_path),
-                                }
-                            )]
-                    
-                    for doc in docs:
-                        if not doc.metadata:
-                            doc.metadata = {}
-                        
-                        cleaned_metadata = {}
-                        cleaned_metadata["source"] = source_name
-                        cleaned_metadata["file_path"] = file_path
-                        cleaned_metadata["filename"] = os.path.basename(file_path)
-                        
-                        for key, value in doc.metadata.items():
-                            if key not in ["source", "file_path"]:
-                                if isinstance(value, (list, dict, set)):
-                                    cleaned_metadata[key] = str(value)
-                                elif value is not None:
-                                    cleaned_metadata[key] = str(value)
-                        
-                        doc.metadata = cleaned_metadata
-                    documents.extend(docs)
-                    logger.debug({
-                        "message": "Loaded documents from file",
-                        "file_path": file_path,
-                        "document_count": len(docs)
-                    })
-                except Exception as e:
-                    logger.error({
-                        "message": "Error loading file",
-                        "file_path": file_path,
-                        "error": str(e)
-                    }, exc_info=True)
-                    continue
-
-            logger.info(f"Total documents loaded: {len(documents)}")
-            return documents
-            
+            connections.connect(uri=self.uri)
+            col = Collection("context")
+            col.load()
+            for wo_id in ids:
+                col.delete(expr=f'id == "{wo_id}"')
+                logger.debug(f"Deleted existing rows for id={wo_id}")
         except Exception as e:
-            logger.error({
-                "message": "Error loading documents",
-                "error": str(e)
-            }, exc_info=True)
-            raise
+            logger.warning(f"Pre-delete failed: {e}")
+        finally:
+            try:
+                connections.disconnect("default")
+            except Exception:
+                pass
 
-    def index_documents(self, documents: List[Document]) -> List[Document]:
+    # ---------------------------------------------------------------------- #
+    #   Indexing
+    # ---------------------------------------------------------------------- #
+    def index_documents(
+        self,
+        documents: List[Document],
+        no_split: bool = False,
+        upsert_by_id: bool = True,
+        echo: bool = False,
+    ):
+        """Index documents into Milvus.
+        Args:
+            documents: list of LangChain Documents
+            no_split: True → skip chunking (use one row)
+            upsert_by_id: True → delete any existing rows for same id before insert
+            echo: True → return splits for debugging
+        """
         try:
-            logger.debug({
-                "message": "Starting document indexing",
-                "document_count": len(documents)
-            })
-            
-            splits = self.text_splitter.split_documents(documents)
-            logger.debug({
-                "message": "Split documents into chunks",
-                "chunk_count": len(splits)
-            })
-            
+            logger.debug(
+                {"message": "Starting document indexing", "document_count": len(documents)}
+            )
+
+            # ---- disable chunking when requested (one row per work order) ----
+            if no_split:
+                splits = documents
+            else:
+                splits = self.text_splitter.split_documents(documents)
+
+            # annotate chunk indices (useful for debugging)
+            chunk_total = len(splits)
+            for i, d in enumerate(splits):
+                d.metadata = d.metadata or {}
+                d.metadata["chunk_index"] = i
+                d.metadata["chunk_total"] = chunk_total
+
+            # collect logical ids for upsert
+            ids = {d.metadata.get("id") for d in splits if d.metadata.get("id")}
+            if upsert_by_id and ids:
+                self._predelete_ids(ids)
+
+            # ---- insert ----
             self._store.add_documents(splits)
             self.flush_store()
-            
-            logger.debug({
-                "message": "Document indexing completed"
-            })            
+
+            logger.debug(
+                {
+                    "message": "Document indexing completed",
+                    "chunks_written": len(splits),
+                    "upsert_ids": list(ids),
+                }
+            )
+
+            return splits if echo else None
         except Exception as e:
-            logger.error({
-                "message": "Error during document indexing",
-                "error": str(e)
-            }, exc_info=True)
+            logger.error(
+                {"message": "Error during document indexing", "error": str(e)}, exc_info=True
+            )
             raise
 
+    # ---------------------------------------------------------------------- #
+    #   Flush / persistence
+    # ---------------------------------------------------------------------- #
     def flush_store(self):
-        """
-        Flush the Milvus collection to ensure that all added documents are persisted to disk.
-        """
+        """Flush the Milvus collection to persist documents."""
         try:
-            from pymilvus import connections
-            
-            connections.connect(uri=self.uri)
-            
-
             from pymilvus import utility
+
+            connections.connect(uri=self.uri)
             utility.flush_all()
-            
-            logger.debug({
-                "message": "Milvus store flushed (persisted to disk)"
-            })
+            logger.debug({"message": "Milvus store flushed"})
         except Exception as e:
-            logger.error({
-                "message": "Error flushing Milvus store",
-                "error": str(e)
-            }, exc_info=True)
+            logger.error({"message": "Error flushing Milvus store", "error": str(e)}, exc_info=True)
+        finally:
+            try:
+                connections.disconnect("default")
+            except Exception:
+                pass
 
-
+    # ---------------------------------------------------------------------- #
+    #   Retrieval
+    # ---------------------------------------------------------------------- #
     def get_documents(self, query: str, k: int = 8, sources: List[str] = None) -> List[Document]:
-        """
-        Get relevant documents using the retriever's invoke method.
-        """
+        """Retrieve similar documents by embedding similarity."""
         try:
             search_kwargs = {"k": k}
-            
             if sources:
                 if len(sources) == 1:
                     filter_expr = f'source == "{sources[0]}"'
                 else:
-                    source_conditions = [f'source == "{source}"' for source in sources]
+                    source_conditions = [f'source == "{s}"' for s in sources]
                     filter_expr = " || ".join(source_conditions)
-                
                 search_kwargs["expr"] = filter_expr
-                logger.debug({
-                    "message": "Retrieving with filter",
-                    "filter": filter_expr
-                })
-            
-            retriever = self._store.as_retriever(
-                search_type="similarity",
-                search_kwargs=search_kwargs
-            )
-            
+
+            retriever = self._store.as_retriever(search_type="similarity", search_kwargs=search_kwargs)
             docs = retriever.invoke(query)
-            logger.debug({
-                "message": "Retrieved documents",
-                "query": query,
-                "document_count": len(docs)
-            })
-            
+            logger.debug({"message": "Retrieved documents", "query": query, "count": len(docs)})
             return docs
         except Exception as e:
-            logger.error({
-                "message": "Error retrieving documents",
-                "error": str(e)
-            }, exc_info=True)
+            logger.error({"message": "Error retrieving documents", "error": str(e)}, exc_info=True)
             return []
 
+    # ---------------------------------------------------------------------- #
+    #   Delete collection
+    # ---------------------------------------------------------------------- #
     def delete_collection(self, collection_name: str) -> bool:
-        """
-        Delete a collection from Milvus.
-        
-        Args:
-            collection_name: Name of the collection to delete
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
+        """Delete a collection from Milvus."""
         try:
-            from pymilvus import connections, Collection, utility
-            
+            from pymilvus import utility
+
             connections.connect(uri=self.uri)
-            
             if utility.has_collection(collection_name):
-                collection = Collection(name=collection_name)
-                
-                collection.drop()
-                
+                Collection(name=collection_name).drop()
                 if self.on_source_deleted:
                     self.on_source_deleted(collection_name)
-                
-                logger.debug({
-                    "message": "Collection deleted successfully",
-                    "collection_name": collection_name
-                })
+                logger.debug({"message": "Collection deleted", "name": collection_name})
                 return True
-            else:
-                logger.warning({
-                    "message": "Collection not found",
-                    "collection_name": collection_name
-                })
-                return False
-        except Exception as e:
-            logger.error({
-                "message": "Error deleting collection",
-                "collection_name": collection_name,
-                "error": str(e)
-            }, exc_info=True)
+            logger.warning({"message": "Collection not found", "name": collection_name})
             return False
+        except Exception as e:
+            logger.error(
+                {"message": "Error deleting collection", "name": collection_name, "error": str(e)},
+                exc_info=True,
+            )
+            return False
+        finally:
+            try:
+                connections.disconnect("default")
+            except Exception:
+                pass
 
 
 def create_vector_store_with_config(config_manager, uri: str = "http://milvus:19530") -> VectorStore:

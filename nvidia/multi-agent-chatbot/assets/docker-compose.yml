@@ -39,19 +39,19 @@ services:
       - MILVUS_ADDRESS=milvus:19530
       - MODELS=gpt-oss-120b #,gpt-oss-20b
 
-  frontend:
-    container_name: frontend
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
-    volumes:
-      - /frontend:/app/frontend
-      - /app/node_modules
-    depends_on:
-      - backend
-    restart: unless-stopped
+  # frontend:
+  #   container_name: frontend
+  #   build:
+  #     context: ./frontend
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "3000:3000"
+  #   volumes:
+  #     - /frontend:/app/frontend
+  #     - /app/node_modules
+  #   depends_on:
+  #     - backend
+  #   restart: unless-stopped
 
 
   postgres:

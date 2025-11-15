@@ -95,10 +95,20 @@ Only include metadata fields that are actually present in the work order. Keep v
                 for k, v in metadata.items() 
                 if v is not None and str(v).strip()
             }
-            
+            for k in ["id", "work_order_id", "workOrderId", "wo_id", "ticket_id"]:
+                 if k in work_order and str(work_order[k]).strip():
+                      clean_metadata["id"] = str(work_order[k]).strip()
+                      break
+
+            # Keep work order number if present (used for lookups)
+            if "work_order_number" in work_order and str(work_order["work_order_number"]).strip():
+                clean_metadata["work_order_number"] = str(work_order["work_order_number"]).strip()
+
+
+
             # Add source and original data
             clean_metadata["source"] = "work_orders"
-            clean_metadata["raw_work_order"] = json.dumps(work_order)[:5000]  # Limit size
+            clean_metadata["raw_work_order"] = json.dumps(work_order)[:9000]  # Limit size
             
             logger.info({
                 "message": "Work order analyzed successfully",
@@ -118,18 +128,41 @@ Only include metadata fields that are actually present in the work order. Keep v
             logger.error(f"Error analyzing work order: {e}", exc_info=True)
             raise
     
+    # def _create_fallback_summary(self, work_order: Dict[str, Any]) -> Tuple[str, Dict[str, str]]:
+    #     """Create a basic summary if LLM parsing fails."""
+    #     summary = f"Work Order: {json.dumps(work_order, indent=2)}"
+    #     metadata = {
+    #         "source": "work_orders",
+    #         "raw_work_order": json.dumps(work_order)[:5000]
+    #     }
+        
+    #     # Extract any obvious ID fields
+    #     for key in ["id", "work_order_id", "workOrderId", "wo_id", "ticket_id"]:
+    #         if key in work_order:
+    #             metadata["id"] = str(work_order[key])
+    #             break
+        
+    #     return summary, metadata
+    
     def _create_fallback_summary(self, work_order: Dict[str, Any]) -> Tuple[str, Dict[str, str]]:
-        """Create a basic summary if LLM parsing fails."""
         summary = f"Work Order: {json.dumps(work_order, indent=2)}"
         metadata = {
             "source": "work_orders",
             "raw_work_order": json.dumps(work_order)[:5000]
-        }
-        
-        # Extract any obvious ID fields
+    }
+
+    # Extract id if present
         for key in ["id", "work_order_id", "workOrderId", "wo_id", "ticket_id"]:
-            if key in work_order:
-                metadata["id"] = str(work_order[key])
+            if key in work_order and str(work_order[key]).strip():
+                metadata["id"] = str(work_order[key]).strip()
                 break
-        
+
+    # Also store work order number if present
+        if "work_order_number" in work_order and str(work_order["work_order_number"]).strip():
+            metadata["work_order_number"] = str(work_order["work_order_number"]).strip()
+
         return summary, metadata
+
+    
+
+    

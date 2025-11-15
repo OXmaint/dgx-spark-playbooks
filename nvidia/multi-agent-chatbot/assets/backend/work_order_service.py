@@ -60,7 +60,7 @@ class WorkOrderService:
             # - The embedding vector
             # - The summary text
             # - All metadata fields
-            self.vector_store.index_documents([document])
+            self.vector_store.index_documents([document], no_split=True, upsert_by_id=True)
             
             logger.info({
                 "message": "Work order stored in Milvus",
