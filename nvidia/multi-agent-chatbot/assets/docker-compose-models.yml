@@ -23,7 +23,7 @@ x-build-base: &build-base
 services:
   # Option 1: Qwen3-VL with vLLM (ARM64 compatible, recommended for Grace Blackwell)
   qwen3-vl:
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:latest-aarch64
     container_name: qwen3-vl
     shm_size: '16g'
     restart: unless-stopped
