@@ -42,9 +42,9 @@ from postgres_storage import PostgreSQLConversationStorage
 mcp = FastMCP("image-understanding-server")
 
 
-model_name = "Qwen/Qwen3-VL-7B-Instruct"
+model_name = "qwen3-30b"
 model_client = OpenAI(
-    base_url=f"http://qwen3-vl:8000/v1",
+    base_url=f"http://qwen3-30b:8000/v1",
     api_key="api_key"
 )
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
