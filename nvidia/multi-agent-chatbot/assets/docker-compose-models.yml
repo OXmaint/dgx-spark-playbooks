@@ -21,13 +21,46 @@ x-build-base: &build-base
   image: local/llama.cpp:server-cuda
 
 services:
-  # Option 1: Qwen3-VL with vLLM (ARM64 compatible, recommended for Grace Blackwell)
-  qwen3-vl:
-    image: vllm/vllm-openai:latest-aarch64
-    container_name: qwen3-vl
-    shm_size: '16g'
-    restart: unless-stopped
-    platform: linux/arm64
+  # Option 1a: Qwen3-VL with vLLM (ARM64 compatible, recommended for Grace Blackwell)
+  # qwen3-vl:
+  #   image: vllm/vllm-openai:latest-aarch64
+  #   container_name: qwen3-vl
+  #   shm_size: '16g'
+  #   restart: unless-stopped
+  #   platform: linux/arm64
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
+  #   environment:
+  #     - CUDA_VISIBLE_DEVICES=0
+  #     - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+  #   command: >
+  #     --model Qwen/Qwen3-VL-7B-Instruct
+  #     --host 0.0.0.0
+  #     --port 8000
+  #     --trust-remote-code
+  #     --max-model-len 8192
+  #     --dtype bfloat16
+  #     --gpu-memory-utilization 0.95
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 5
+  #     start_period: 120s
+
+  # Option 1b: Qwen3-30B offline downloaded
+  qwen3-30b:
+    <<: *build-base
+    container_name: qwen3-30b
+    ports:
+      - "8003:8000"    # Unique port to run multiple models
+    volumes:
+      - ./models:/models
     deploy:
       resources:
         reservations:
@@ -35,23 +68,22 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    environment:
-      - CUDA_VISIBLE_DEVICES=0
-      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-    command: >
-      --model Qwen/Qwen3-VL-7B-Instruct
-      --host 0.0.0.0
-      --port 8000
-      --trust-remote-code
-      --max-model-len 8192
-      --dtype bfloat16
-      --gpu-memory-utilization 0.95
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 120s
+    command:
+      - "-m"
+      - "/models/qwen3-30b-a3b-Q5_K_M.gguf"  # Update filename if using Q4_K_M
+      - "--port"
+      - "8000"
+      - "--host"
+      - "0.0.0.0"
+      - "-c"
+      - "32768"                  # 32K context
+      - "--n-gpu-layers"
+      - "999"                    # Full GPU offload
+      - "--jinja"                 # For Qwen chat templates
+      - "--temp"
+      - "0.7"
+      - "--top-p"
+      - "0.95"
 
   # Option 2: Qwen2.5-VL with TensorRT-LLM (fallback if Qwen3-VL doesn't work)
   # qwen2.5-vl:
