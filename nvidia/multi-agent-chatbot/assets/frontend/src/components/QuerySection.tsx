@@ -23,6 +23,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter"; // NEW
 import { oneDark, oneLight, Dark, Light } from "react-syntax-highlighter/dist/esm/styles/prism"; // NEW
 import WelcomeSection from "./WelcomeSection";
 import ImageUpload from "./ImageUpload";
+import { useSelectedOrganization } from "./OrganizationSelector";
 
 export function makeChatTheme(isDark: boolean) {
   const base = isDark ? oneDark : oneLight;
@@ -209,6 +210,7 @@ export default function QuerySection({
   const hasAssistantContent = useRef(false);
   const fadeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [showImageUpload, setShowImageUpload] = useState(false);
+  const selectedOrganization = useSelectedOrganization();
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -474,9 +476,10 @@ export default function QuerySection({
 
     try {
       wsRef.current.send(JSON.stringify({
-        message: currentQuery
+        message: currentQuery,
+        organization: selectedOrganization
       }));
- 
+
       setResponse(prev => {
         try {
           const messages = JSON.parse(prev);
