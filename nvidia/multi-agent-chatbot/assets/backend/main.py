@@ -139,16 +139,39 @@ async def websocket_endpoint(websocket: WebSocket, chat_id: str):
                 image_data = await postgres_storage.get_image(image_id)
                 logger.debug(f"Retrieved image data for image_id: {image_id}, data length: {len(image_data) if image_data else 0}")
             
+            has_image_response = False
             try:
                 async for event in agent.query(query_text=new_message, chat_id=chat_id, image_data=image_data):
+                    # Log event details for debugging
+                    if isinstance(event, dict):
+                        event_type = event.get('type', 'unknown')
+                        # Check for nested final_response in token events
+                        if event_type == 'token' and isinstance(event.get('data'), dict):
+                            nested_data = event.get('data', {})
+                            if nested_data.get('type') == 'final_response':
+                                logger.info(f"[WEBSOCKET] Sending token with nested final_response")
+                                logger.info(f"[WEBSOCKET] Nested data has 'text': {'text' in nested_data}, length: {len(nested_data.get('text', ''))}")
+                                logger.info(f"[WEBSOCKET] Nested data has 'image': {'image' in nested_data}, length: {len(nested_data.get('image', ''))}")
+                                # Mark that we sent an image response
+                                if nested_data.get('image'):
+                                    has_image_response = True
+                            else:
+                                logger.debug(f"[WEBSOCKET] Sending event type: {event_type}")
+                        else:
+                            logger.debug(f"[WEBSOCKET] Sending event type: {event_type}")
+                    else:
+                        logger.debug(f"[WEBSOCKET] Sending non-dict event: {type(event)}, length: {len(str(event))}")
                     await websocket.send_json(event)
             except Exception as query_error:
                 logger.error(f"Error in agent.query: {str(query_error)}", exc_info=True)
                 await websocket.send_json({"type": "error", "content": f"Error processing request: {str(query_error)}"})
-        
-            final_messages = await postgres_storage.get_messages(chat_id)
-            final_history = [postgres_storage._message_to_dict(msg) for i, msg in enumerate(final_messages) if i != 0]
-            await websocket.send_json({"type": "history", "messages": final_history})
+
+            # Don't send history update if we sent an image response
+            # (the history from DB doesn't include the image, it would overwrite the frontend state)
+            if not has_image_response:
+                final_messages = await postgres_storage.get_messages(chat_id)
+                final_history = [postgres_storage._message_to_dict(msg) for i, msg in enumerate(final_messages) if i != 0]
+                await websocket.send_json({"type": "history", "messages": final_history})
             
     except WebSocketDisconnect:
         logger.debug(f"Client disconnected from chat {chat_id}")

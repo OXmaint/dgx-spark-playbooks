@@ -46,7 +46,10 @@ download_if_needed "https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF/resolve/
 # Uncomment next line if you want to use gpt-oss-20b
 download_if_needed "https://huggingface.co/ggml-org/gpt-oss-20b-GGUF/resolve/main/gpt-oss-20b-mxfp4.gguf" "gpt-oss-20b-mxfp4.gguf"
 
-# Qwen3-30B
-download_if_needed "https://huggingface.co/bartowski/Qwen_Qwen3-30B-A3B-GGUF/resolve/main/Qwen_Qwen3-30B-A3B-Q5_K_M.gguf" "qwen3-30b-a3b-Q5_K_M.gguf"
+# Qwen3-VL-30B Vision Language Model (for image understanding and general text)
+download_if_needed "https://huggingface.co/bartowski/Qwen_Qwen3-VL-30B-A3B-Thinking-GGUF/resolve/main/Qwen_Qwen3-VL-30B-A3B-Thinking-Q5_K_M.gguf" "qwen3-vl-30b-a3b-thinking-Q5_K_M.gguf"
+
+# Multimodal projector for Qwen3-VL (required for vision capabilities)
+download_if_needed "https://huggingface.co/bartowski/Qwen_Qwen3-VL-30B-A3B-Thinking-GGUF/resolve/main/mmproj-Qwen_Qwen3-VL-30B-A3B-Thinking-f16.gguf" "mmproj-qwen3-vl-30b-a3b-thinking-f16.gguf"
 
 echo "All models downloaded."

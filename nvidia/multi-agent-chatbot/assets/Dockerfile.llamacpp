@@ -39,7 +39,8 @@ RUN if [ "${CUDA_DOCKER_ARCH}" != "default" ]; then \
     cmake --build build --config Release -j$(nproc)
 
 RUN mkdir -p /app/lib && \
-    find build -name "*.so" -exec cp {} /app/lib \;
+    find build -name "*.so*" -exec cp -P {} /app/lib \; && \
+    cd /app/lib && ldconfig -n .
 
 RUN mkdir -p /app/full \
     && cp build/bin/* /app/full \
@@ -59,14 +60,20 @@ RUN apt-get update \
     && find /var/cache/apt/archives /var/lib/apt/lists -not -name lock -type f -delete \
     && find /var/cache -type f -delete
 
-COPY --from=build /app/lib/ /app
+COPY --from=build /app/lib/ /app/
 
+# Create ldconfig entry for /app and run ldconfig
+RUN echo "/app" > /etc/ld.so.conf.d/llama.conf && ldconfig
 
 FROM base
 
 ENV LLAMA_ARG_HOST=0.0.0.0
+ENV LD_LIBRARY_PATH=/app:$LD_LIBRARY_PATH
 
 COPY --from=build /app/full/llama-server /app
+
+# Run ldconfig to update library cache
+RUN ldconfig
 
 WORKDIR /app
 

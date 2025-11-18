@@ -272,8 +272,20 @@ export default function QuerySection({
               break;
             }
             case "token": {
+              // Debug logging
+              console.log('[FRONTEND] Received token event');
+              console.log('[FRONTEND] msg.data type:', typeof msg.data);
+              console.log('[FRONTEND] text type:', typeof text);
+              if (typeof text === "object") {
+                console.log('[FRONTEND] text.type:', text?.type);
+                console.log('[FRONTEND] text has image:', !!text?.image);
+                console.log('[FRONTEND] text.image length:', text?.image?.length);
+              }
+
               // Check if this is a final_response object with image data
               if (typeof text === "object" && text.type === "final_response") {
+                console.log('[FRONTEND] Processing final_response with image');
+                console.log('[FRONTEND] Image data starts with:', text.image?.substring(0, 50));
                 setResponse(prev => {
                   try {
                     const messages = JSON.parse(prev);
@@ -281,15 +293,19 @@ export default function QuerySection({
                     if (last && last.type === "AssistantMessage") {
                       last.content = text.text || "";
                       last.image = text.image;
+                      console.log('[FRONTEND] Updated existing AssistantMessage with image');
                     } else {
                       messages.push({
                         type: "AssistantMessage",
                         content: text.text || "",
                         image: text.image
                       });
+                      console.log('[FRONTEND] Pushed new AssistantMessage with image');
                     }
+                    console.log('[FRONTEND] Final messages:', messages);
                     return JSON.stringify(messages);
-                  } catch {
+                  } catch (e) {
+                    console.error('[FRONTEND] Error processing final_response:', e);
                     return prev;
                   }
                 });

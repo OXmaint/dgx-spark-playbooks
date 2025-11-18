@@ -19,6 +19,7 @@
 import asyncio
 import contextlib
 import json
+import re
 from typing import AsyncIterator, List, Dict, Any, TypedDict, Optional, Callable, Awaitable
 
 from langchain_core.messages import HumanMessage, AIMessage, AnyMessage, SystemMessage, ToolMessage, ToolCall
@@ -247,8 +248,21 @@ class ChatAgent:
                         tool_args["image"] = state["image_data"]
                     logger.info(f'Executing tool {tool_call["name"]} with args: {tool_args}')
                     tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(tool_args)
-                    # Store the annotated image in state
+
+                    # Log the tool result for debugging
+                    logger.info(f"[ANNOTATE_IMAGE] Tool returned result of length: {len(tool_result) if tool_result else 0}")
+                    logger.info(f"[ANNOTATE_IMAGE] Result starts with: {tool_result[:50] if tool_result else 'None'}...")
+                    logger.info(f"[ANNOTATE_IMAGE] Result is data URL: {tool_result.startswith('data:image/') if tool_result else False}")
+
+                    # Store the annotated image in state for frontend display
                     state["annotated_image"] = tool_result
+                    logger.info(f"[ANNOTATE_IMAGE] Stored in state['annotated_image'], length: {len(state.get('annotated_image', ''))}")
+
+                    # Return a short confirmation to LLM instead of the full base64 image
+                    num_boxes = len(tool_args.get("bounding_boxes", []))
+                    tags = tool_args.get("tags", [])
+                    tag_info = f" with labels: {', '.join(tags)}" if tags else ""
+                    tool_result = f"Successfully annotated image with {num_boxes} bounding box(es){tag_info}. The annotated image will be automatically displayed to the user. Do NOT include any image data, base64 strings, or markdown image syntax in your response - just describe what was annotated."
                 else:
                     tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(tool_call["args"])
 
@@ -273,7 +287,7 @@ class ChatAgent:
             )
 
         state["iterations"] = state.get("iterations", 0) + 1
-        
+
         logger.debug({
             "message": "GRAPH: EXITING NODE - action/tool_node",
             "chat_id": state.get("chat_id"),
@@ -282,7 +296,19 @@ class ChatAgent:
             "next_step": "→ returning to generate"
         })
         await self.stream_callback({'type': 'node_end', 'data': 'tool_node'})
-        return {"messages": messages + outputs, "iterations": state.get("iterations", 0) + 1}
+
+        # Build return dict with all state updates
+        result = {
+            "messages": messages + outputs,
+            "iterations": state.get("iterations", 0) + 1
+        }
+
+        # Include annotated_image if it was set
+        if state.get("annotated_image"):
+            result["annotated_image"] = state["annotated_image"]
+            logger.info(f"[TOOL_NODE] Returning annotated_image in result, length: {len(state['annotated_image'])}")
+
+        return result
 
     async def generate(self, state: State) -> Dict[str, Any]:
         """Generate AI response using the current model.
@@ -485,8 +511,8 @@ class ChatAgent:
         config = {"configurable": {"thread_id": chat_id}}
 
         try:
-            existing_messages = await self.conversation_store.get_messages(chat_id, limit=1)
-            
+            existing_messages = await self.conversation_store.get_messages(chat_id)
+
             base_system_prompt = self.system_prompt
             if image_data:
                 image_context = "\n\nIMAGE CONTEXT: The user has uploaded an image with their message. You MUST use the explain_image tool to analyze it."
@@ -496,9 +522,27 @@ class ChatAgent:
                 messages_to_process = [SystemMessage(content=base_system_prompt)]
 
             if existing_messages:
+                # Filter out SystemMessages and ensure ToolMessages have valid preceding AIMessage with tool_calls
+                filtered_messages = []
+                last_ai_had_tool_calls = False
+
                 for msg in existing_messages:
-                    if not isinstance(msg, SystemMessage):
-                        messages_to_process.append(msg)
+                    if isinstance(msg, SystemMessage):
+                        continue
+                    elif isinstance(msg, AIMessage):
+                        filtered_messages.append(msg)
+                        last_ai_had_tool_calls = bool(hasattr(msg, 'tool_calls') and msg.tool_calls)
+                    elif isinstance(msg, ToolMessage):
+                        # Only include ToolMessage if preceding AIMessage had tool_calls
+                        if last_ai_had_tool_calls:
+                            filtered_messages.append(msg)
+                        # Keep flag true for multiple ToolMessages from same AIMessage
+                    else:
+                        # HumanMessage or other types
+                        filtered_messages.append(msg)
+                        last_ai_had_tool_calls = False
+
+                messages_to_process.extend(filtered_messages)
 
             messages_to_process.append(HumanMessage(content=query_text))
 
@@ -592,14 +636,43 @@ class ChatAgent:
                         logger.warning({"message": "Failed to persist conversation", "chat_id": chat_id, "error": str(save_err)})
 
                     content = getattr(final_msg, "content", None)
+                    logger.info(f"[FINAL_RESPONSE] Content length: {len(content) if content else 0}")
+                    logger.info(f"[FINAL_RESPONSE] Has annotated_image in state: {bool(self.last_state.get('annotated_image'))}")
+
                     if content:
                         # Check if we have an annotated image to send separately
                         if self.last_state.get("annotated_image"):
+                            annotated_img = self.last_state["annotated_image"]
+                            logger.info(f"[FINAL_RESPONSE] Annotated image length: {len(annotated_img)}")
+                            logger.info(f"[FINAL_RESPONSE] Annotated image starts with: {annotated_img[:50]}...")
+
+                            # Strip any base64 image data from the text response
+                            # Remove markdown image syntax with base64 data
+                            cleaned_content = re.sub(
+                                r'!\[([^\]]*)\]\(data:image/[^;]+;base64,[A-Za-z0-9+/=]+\)',
+                                '',
+                                content
+                            )
+                            # Also remove any raw base64 data URLs
+                            cleaned_content = re.sub(
+                                r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+',
+                                '',
+                                cleaned_content
+                            )
+                            # Clean up any extra whitespace
+                            cleaned_content = re.sub(r'\n{3,}', '\n\n', cleaned_content).strip()
+
+                            logger.info(f"[FINAL_RESPONSE] Cleaned content: {cleaned_content}")
+
                             response_data = {
-                                "type": "final_response",
-                                "text": content,
-                                "image": self.last_state["annotated_image"]
+                                "type": "token",
+                                "data": {
+                                    "type": "final_response",
+                                    "text": cleaned_content,
+                                    "image": annotated_img
+                                }
                             }
+                            logger.info(f"[FINAL_RESPONSE] Sending response_data with nested type: final_response, text length: {len(cleaned_content)}, image length: {len(annotated_img)}")
                             await token_q.put(response_data)
                         else:
                             await token_q.put(content)

@@ -101,6 +101,21 @@ CRITICAL RULES:
 
 - **DO NOT** try to answer questions from documents yourself - always use the search_documents tool
 
+ANNOTATE_IMAGE TOOL USAGE:
+The annotate_image tool draws bounding boxes with optional labels on images using OpenCV. It accepts:
+- **image**: Can be a file path, base64 data URL, OR a URL (http/https) to fetch the image from
+- **bounding_boxes**: List of [x1, y1, x2, y2] coordinates where (x1, y1) is top-left and (x2, y2) is bottom-right in pixels
+- **color**: Color name ("red", "green", "blue", "yellow", "cyan", "magenta", "white", "black", "orange", "purple", "pink") or hex code ("#FF0000")
+- **tags**: Optional list of labels for each bounding box (tags[i] labels bounding_boxes[i])
+
+Example tool call:
+annotate_image({
+    "image": "https://example.com/image.jpg",
+    "bounding_boxes": [[100, 50, 300, 400], [350, 100, 500, 350]],
+    "color": "green",
+    "tags": ["Person", "Car"]
+})
+
 Batching policy:
 - **Batch** when: (a) calls are independent (e.g., weather in two cities), (b) calls target different tools without dependency, or (c) multiple calls to the same tool with different arguments.
 - **Do not batch** when: a call's arguments depend on a previous tool's output (e.g., annotating an image which depends on the output of explain_image tool to identify bounding boxes).

@@ -44,7 +44,7 @@ class MCPClient:
             },
             "image-annotation-server": {
                 "command": "python",
-                "args": ["tools/python_sandbox.py"],
+                "args": ["tools/mcp_servers/image_annotation.py"],
                 "transport": "stdio",
             },
             # "code-generation-server": {
