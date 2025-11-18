@@ -123,9 +123,22 @@ async def websocket_endpoint(websocket: WebSocket, chat_id: str):
     try:
         await websocket.accept()
         logger.debug(f"WebSocket connection accepted for chat_id: {chat_id}")
-        
+
         history_messages = await postgres_storage.get_messages(chat_id)
         history = [postgres_storage._message_to_dict(msg) for i, msg in enumerate(history_messages) if i != 0]
+
+        # Resolve image attachments - fetch actual image data for each attachment
+        for msg in history:
+            if msg.get('attachments'):
+                for attachment in msg['attachments']:
+                    if attachment.get('type') == 'image' and attachment.get('image_id'):
+                        image_id = attachment['image_id']
+                        image_data = await postgres_storage.get_image(image_id)
+                        if image_data:
+                            # Add resolved image data to the message
+                            msg['image'] = image_data
+                            logger.debug(f"Resolved image attachment: {image_id}")
+
         await websocket.send_json({"type": "history", "messages": history})
         
         while True:

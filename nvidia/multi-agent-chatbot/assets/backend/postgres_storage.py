@@ -231,14 +231,18 @@ class PostgreSQLConversationStorage:
             "type": message.__class__.__name__,
             "content": message.content,
         }
-        
+
         if hasattr(message, "tool_calls") and message.tool_calls:
             result["tool_calls"] = message.tool_calls
-        
+
         if isinstance(message, ToolMessage):
             result["tool_call_id"] = getattr(message, "tool_call_id", None)
             result["name"] = getattr(message, "name", None)
-            
+
+        # Include attachments (image references) if present
+        if hasattr(message, "additional_kwargs") and message.additional_kwargs.get("attachments"):
+            result["attachments"] = message.additional_kwargs["attachments"]
+
         return result
 
     def _dict_to_message(self, data: Dict) -> BaseMessage:

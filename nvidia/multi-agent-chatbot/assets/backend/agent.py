@@ -677,6 +677,33 @@ class ChatAgent:
                     final_msg = self.last_state["messages"][-1]
                     try:
                         logger.debug(f'Saving messages to conversation store for chat: {chat_id}')
+
+                        # Store annotated image if present and attach reference to message
+                        annotated_image_id = None
+                        if self.last_state.get("annotated_image"):
+                            import uuid
+                            annotated_image_id = f"annotated-{uuid.uuid4()}"
+                            await self.conversation_store.store_image_with_metadata(
+                                image_id=annotated_image_id,
+                                image_base64=self.last_state["annotated_image"],
+                                chat_id=chat_id,
+                                filename=f"annotated_image_{annotated_image_id[:8]}.png",
+                                content_type="image/png",
+                                persistent=True
+                            )
+                            logger.info(f"[ANNOTATE_IMAGE] Stored annotated image to database: {annotated_image_id}")
+
+                            # Attach the image reference to the last AIMessage
+                            messages = self.last_state["messages"]
+                            if messages and hasattr(messages[-1], 'additional_kwargs'):
+                                # Store image ID as attachment for persistence
+                                if not messages[-1].additional_kwargs:
+                                    messages[-1].additional_kwargs = {}
+                                messages[-1].additional_kwargs["attachments"] = [{
+                                    "type": "image",
+                                    "image_id": annotated_image_id
+                                }]
+
                         await self.conversation_store.save_messages(chat_id, self.last_state["messages"])
                     except Exception as save_err:
                         logger.warning({"message": "Failed to persist conversation", "chat_id": chat_id, "error": str(save_err)})
