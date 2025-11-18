@@ -534,6 +534,10 @@ input:checked + .toggleSlider:before {
   cursor: not-allowed;
 }
 
+.refreshImagesButton {
+  margin-top: 8px;
+}
+
 .buttonGroup {
   display: flex;
   flex-direction: column;
@@ -609,6 +613,112 @@ input:checked + .toggleSlider:before {
 }
 
 :global(.dark) .noSources {
+  color: #9ca3af;
+}
+
+/* Images styles */
+.imagesContainer {
+  margin-top: 8px;
+  max-height: 150px;
+  overflow-y: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  padding: 8px;
+  background-color: #f9fafb;
+}
+
+:global(.dark) .imagesContainer {
+  background-color: #374151;
+  border-color: #4b5563;
+}
+
+.imageItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  border-radius: 4px;
+  background-color: white;
+  border: 1px solid #e2e8f0;
+}
+
+:global(.dark) .imageItem {
+  background-color: #1f2937;
+  border-color: #4b5563;
+}
+
+.imageItem:last-child {
+  margin-bottom: 0;
+}
+
+.imageInfo {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.imageFilename {
+  font-size: 13px;
+  font-weight: 500;
+  color: #1f2937;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+:global(.dark) .imageFilename {
+  color: #e5e7eb;
+}
+
+.imageDescription {
+  font-size: 11px;
+  color: #718096;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+:global(.dark) .imageDescription {
+  color: #9ca3af;
+}
+
+.deleteImageButton {
+  background: none;
+  border: none;
+  color: #718096;
+  padding: 4px 6px;
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 16px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.deleteImageButton:hover {
+  background-color: #fee2e2;
+  color: #dc2626;
+}
+
+:global(.dark) .deleteImageButton:hover {
+  background-color: #7f1d1d;
+  color: #fca5a5;
+}
+
+.noImages {
+  color: #718096;
+  font-size: 14px;
+  padding: 8px 0;
+  text-align: center;
+}
+
+:global(.dark) .noImages {
   color: #9ca3af;
 }
 

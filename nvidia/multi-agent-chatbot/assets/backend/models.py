@@ -32,4 +32,8 @@ class ChatRenameRequest(BaseModel):
     new_name: str
 
 class SelectedModelRequest(BaseModel):
-    model: str      
+    model: str
+
+class ImageDescriptionRequest(BaseModel):
+    image_id: str
+    description: str

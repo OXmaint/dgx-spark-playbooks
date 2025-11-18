@@ -235,17 +235,37 @@ class ChatAgent:
             await self.stream_callback({'type': 'tool_start', 'data': tool_call["name"]})
             
             try:
-                if tool_call["name"] == "explain_image" and state.get("image_data"):
+                if tool_call["name"] == "explain_image":
                     tool_args = tool_call["args"].copy()
-                    tool_args["image"] = state["image_data"]
+                    # If image data is in state (current upload), use it
+                    if state.get("image_data") and not tool_args.get("image"):
+                        tool_args["image"] = state["image_data"]
+                    # If image_id is provided, fetch from database
+                    elif tool_args.get("image_id") and not tool_args.get("image"):
+                        image_id = tool_args.get("image_id")
+                        stored_image = await self.conversation_store.get_image(image_id)
+                        if stored_image:
+                            tool_args["image"] = stored_image
+                            logger.info(f"[EXPLAIN_IMAGE] Retrieved image from database: {image_id}")
+                        else:
+                            logger.warning(f"[EXPLAIN_IMAGE] Image not found in database: {image_id}")
                     logger.info(f'Executing tool {tool_call["name"]} with args: {tool_args}')
                     tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(tool_args)
                     state["process_image_used"] = True
                 elif tool_call["name"] == "annotate_image":
                     tool_args = tool_call["args"].copy()
-                    # If image data is in state, use it
+                    # If image data is in state (current upload), use it
                     if state.get("image_data") and not tool_args.get("image"):
                         tool_args["image"] = state["image_data"]
+                    # If image_id is provided, fetch from database
+                    elif tool_args.get("image_id") and not tool_args.get("image"):
+                        image_id = tool_args.get("image_id")
+                        stored_image = await self.conversation_store.get_image(image_id)
+                        if stored_image:
+                            tool_args["image"] = stored_image
+                            logger.info(f"[ANNOTATE_IMAGE] Retrieved image from database: {image_id}")
+                        else:
+                            logger.warning(f"[ANNOTATE_IMAGE] Image not found in database: {image_id}")
                     logger.info(f'Executing tool {tool_call["name"]} with args: {tool_args}')
                     tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(tool_args)
 
@@ -513,13 +533,39 @@ class ChatAgent:
         try:
             existing_messages = await self.conversation_store.get_messages(chat_id)
 
+            # Build system prompt with image context awareness
             base_system_prompt = self.system_prompt
+
+            # Get available images for this chat to make model context-aware
+            available_images = await self.conversation_store.list_images_for_chat(chat_id)
+            image_catalog_context = ""
+
+            if available_images:
+                image_list = []
+                for img in available_images:
+                    img_info = f"  - ID: {img['image_id']}"
+                    if img.get('filename'):
+                        img_info += f", Filename: {img['filename']}"
+                    if img.get('description'):
+                        img_info += f", Description: {img['description']}"
+                    image_list.append(img_info)
+
+                image_catalog_context = "\n\nAVAILABLE IMAGES IN THIS CHAT:\n"
+                image_catalog_context += "You have access to the following images that were previously uploaded in this conversation:\n"
+                image_catalog_context += "\n".join(image_list)
+                image_catalog_context += "\n\nIMPORTANT - How to reference images:"
+                image_catalog_context += "\n- When the user refers to an image by filename (e.g., 'the cat image', 'circuit_board.jpg'), find the matching image above and use its ID"
+                image_catalog_context += "\n- When using image tools (explain_image, annotate_image), pass the image_id parameter with the correct ID from the list above"
+                image_catalog_context += "\n- If the user's description matches a filename or description, use that image's ID"
+                image_catalog_context += "\n- Example: If user says 'annotate the cat in my_cat.jpg' and you see 'ID: abc-123, Filename: my_cat.jpg', use image_id='abc-123'"
+
             if image_data:
-                image_context = "\n\nIMAGE CONTEXT: The user has uploaded an image with their message. You MUST use the explain_image tool to analyze it."
-                system_prompt_with_image = base_system_prompt + image_context
-                messages_to_process = [SystemMessage(content=system_prompt_with_image)]
+                image_context = "\n\nCURRENT IMAGE: The user has uploaded a NEW image with their current message. You MUST use the explain_image tool to analyze it."
+                system_prompt_with_context = base_system_prompt + image_catalog_context + image_context
+                messages_to_process = [SystemMessage(content=system_prompt_with_context)]
             else:
-                messages_to_process = [SystemMessage(content=base_system_prompt)]
+                system_prompt_with_context = base_system_prompt + image_catalog_context
+                messages_to_process = [SystemMessage(content=system_prompt_with_context)]
 
             if existing_messages:
                 # Filter out SystemMessages and ensure ToolMessages have valid preceding AIMessage with tool_calls

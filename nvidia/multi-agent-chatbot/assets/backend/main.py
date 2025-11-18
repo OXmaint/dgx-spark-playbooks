@@ -37,7 +37,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from agent import ChatAgent
 from config import ConfigManager
 from logger import logger, log_request, log_response, log_error
-from models import ChatIdRequest, ChatRenameRequest, SelectedModelRequest
+from models import ChatIdRequest, ChatRenameRequest, SelectedModelRequest, ImageDescriptionRequest
 from postgres_storage import PostgreSQLConversationStorage
 from utils import process_and_ingest_files_background
 from vector_store import create_vector_store_with_config
@@ -181,21 +181,38 @@ async def websocket_endpoint(websocket: WebSocket, chat_id: str):
 
 @app.post("/upload-image")
 async def upload_image(image: UploadFile = File(...), chat_id: str = Form(...)):
-    """Upload and store an image for chat processing.
-    
+    """Upload and store an image for chat processing with metadata.
+
     Args:
         image: Uploaded image file
         chat_id: Chat identifier for context
-        
+
     Returns:
-        Dictionary with generated image_id
+        Dictionary with generated image_id and metadata
     """
     image_data = await image.read()
     image_base64 = base64.b64encode(image_data).decode('utf-8')
     data_uri = f"data:{image.content_type};base64,{image_base64}"
     image_id = str(uuid.uuid4())
-    await postgres_storage.store_image(image_id, data_uri)
-    return {"image_id": image_id}
+
+    # Store image with metadata for context awareness
+    await postgres_storage.store_image_with_metadata(
+        image_id=image_id,
+        image_base64=data_uri,
+        chat_id=chat_id,
+        filename=image.filename,
+        content_type=image.content_type,
+        persistent=True  # Chat-associated images don't expire
+    )
+
+    logger.debug(f"Image uploaded: {image_id}, filename: {image.filename}, chat_id: {chat_id}")
+
+    return {
+        "image_id": image_id,
+        "filename": image.filename,
+        "content_type": image.content_type,
+        "chat_id": chat_id
+    }
 
 
 @app.post("/ingest")
@@ -520,7 +537,7 @@ async def clear_all_chats():
 @app.delete("/collections/{collection_name}")
 async def delete_collection(collection_name: str):
     """Delete a document collection from the vector store.
-    
+
     Args:
         collection_name: Name of the collection to delete
     """
@@ -532,6 +549,136 @@ async def delete_collection(collection_name: str):
             raise HTTPException(status_code=404, detail=f"Collection '{collection_name}' not found or could not be deleted")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting collection: {str(e)}")
+
+
+# Image management endpoints
+
+@app.get("/images")
+async def list_images(limit: int = 50):
+    """List all available images with metadata.
+
+    Args:
+        limit: Maximum number of images to return (default 50)
+
+    Returns:
+        List of image metadata
+    """
+    try:
+        images = await postgres_storage.list_images(limit=limit)
+        return {"images": images}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing images: {str(e)}")
+
+
+@app.get("/chat/{chat_id}/images")
+async def list_chat_images(chat_id: str):
+    """List all images associated with a specific chat.
+
+    Args:
+        chat_id: Chat identifier
+
+    Returns:
+        List of image metadata for the chat
+    """
+    try:
+        images = await postgres_storage.list_images_for_chat(chat_id)
+        return {"images": images, "chat_id": chat_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing chat images: {str(e)}")
+
+
+@app.get("/image/{image_id}")
+async def get_image_data(image_id: str):
+    """Get image data and metadata by ID.
+
+    Args:
+        image_id: Unique image identifier
+
+    Returns:
+        Image data and metadata
+    """
+    try:
+        image_data = await postgres_storage.get_image(image_id)
+        metadata = await postgres_storage.get_image_metadata(image_id)
+
+        if not image_data:
+            raise HTTPException(status_code=404, detail=f"Image {image_id} not found or expired")
+
+        return {
+            "image_id": image_id,
+            "image_data": image_data,
+            "metadata": metadata
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting image: {str(e)}")
+
+
+@app.get("/image/{image_id}/metadata")
+async def get_image_metadata(image_id: str):
+    """Get metadata for a specific image.
+
+    Args:
+        image_id: Unique image identifier
+
+    Returns:
+        Image metadata
+    """
+    try:
+        metadata = await postgres_storage.get_image_metadata(image_id)
+        if not metadata:
+            raise HTTPException(status_code=404, detail=f"Image metadata for {image_id} not found")
+        return metadata
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting image metadata: {str(e)}")
+
+
+@app.post("/image/{image_id}/description")
+async def update_image_description(image_id: str, request: ImageDescriptionRequest):
+    """Update the description of an image.
+
+    Args:
+        image_id: Unique image identifier
+        request: Request containing the new description
+
+    Returns:
+        Success status
+    """
+    try:
+        success = await postgres_storage.update_image_description(image_id, request.description)
+        if success:
+            return {"status": "success", "message": f"Description updated for image {image_id}"}
+        else:
+            raise HTTPException(status_code=404, detail=f"Image {image_id} not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating image description: {str(e)}")
+
+
+@app.delete("/image/{image_id}")
+async def delete_image(image_id: str):
+    """Delete an image and its metadata.
+
+    Args:
+        image_id: Unique image identifier
+
+    Returns:
+        Success status
+    """
+    try:
+        success = await postgres_storage.delete_image(image_id)
+        if success:
+            return {"status": "success", "message": f"Image {image_id} deleted successfully"}
+        else:
+            raise HTTPException(status_code=404, detail=f"Image {image_id} not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting image: {str(e)}")
 
 
 if __name__ == "__main__":

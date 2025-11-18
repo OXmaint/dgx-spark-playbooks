@@ -210,6 +210,7 @@ export default function QuerySection({
   const hasAssistantContent = useRef(false);
   const fadeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [showImageUpload, setShowImageUpload] = useState(false);
+  const [uploadedImageId, setUploadedImageId] = useState<string | null>(null);
   const selectedOrganization = useSelectedOrganization();
 
   useEffect(() => {
@@ -491,10 +492,17 @@ export default function QuerySection({
     hasAssistantContent.current = false;
 
     try {
-      wsRef.current.send(JSON.stringify({
+      const messagePayload: { message: string; organization: string; image_id?: string } = {
         message: currentQuery,
         organization: selectedOrganization
-      }));
+      };
+
+      // Include image_id if an image was uploaded
+      if (uploadedImageId) {
+        messagePayload.image_id = uploadedImageId;
+      }
+
+      wsRef.current.send(JSON.stringify(messagePayload));
 
       setResponse(prev => {
         try {
@@ -508,6 +516,12 @@ export default function QuerySection({
           return prev + `\n\nHuman: ${currentQuery}\n\nAssistant: `;
         }
       });
+
+      // Clear the uploaded image after sending
+      if (uploadedImageId) {
+        setUploadedImage(null);
+        setUploadedImageId(null);
+      }
     } catch (error) {
       console.error("Error sending message:", error);
       setIsStreaming(false);
@@ -523,11 +537,17 @@ export default function QuerySection({
   };
 
   const handleImageUpload = async (file: File) => {
+    if (!currentChatId) {
+      alert('No active chat. Please wait for chat to initialize.');
+      return;
+    }
+
     try {
       setIsUploadingImage(true);
 
       const formData = new FormData();
       formData.append('image', file);
+      formData.append('chat_id', currentChatId);
 
       const response = await fetch('/api/upload-image', {
         method: 'POST',
@@ -542,11 +562,13 @@ export default function QuerySection({
       console.log('Image uploaded successfully:', data);
 
       setUploadedImage(file);
+      setUploadedImageId(data.image_id);
       setShowImageUpload(false); // Close the modal after successful upload
     } catch (error) {
       console.error('Error uploading image:', error);
       alert('Failed to upload image. Please try again.');
       setUploadedImage(null);
+      setUploadedImageId(null);
     } finally {
       setIsUploadingImage(false);
     }

@@ -26,6 +26,16 @@ interface ChatMetadata {
   name: string;
 }
 
+interface ImageMetadata {
+  image_id: string;
+  chat_id: string | null;
+  filename: string | null;
+  description: string | null;
+  content_type: string | null;
+  uploaded_at: string | null;
+  is_active: boolean;
+}
+
 interface SidebarProps {
   showIngestion: boolean;
   setShowIngestion: (value: boolean) => void;
@@ -55,7 +65,9 @@ export default function Sidebar({
   const [chats, setChats] = useState<string[]>([]);
   const [isLoadingChats, setIsLoadingChats] = useState(false);
   const [chatMetadata, setChatMetadata] = useState<Record<string, ChatMetadata>>({});
-  
+  const [images, setImages] = useState<ImageMetadata[]>([]);
+  const [isLoadingImages, setIsLoadingImages] = useState(false);
+
   // Add ref for chat list
   const chatListRef = useRef<HTMLDivElement>(null);
 
@@ -150,12 +162,38 @@ export default function Sidebar({
     }
   }, []);
 
+  // Fetch available images
+  const fetchImages = useCallback(async () => {
+    try {
+      setIsLoadingImages(true);
+      console.log("Fetching images...");
+      const response = await fetch("/api/images");
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Error fetching images: ${response.status} - ${errorText}`);
+        setImages([]);
+        return;
+      }
+
+      const data = await response.json();
+      console.log("Images fetched:", data.images);
+      setImages(data.images || []);
+    } catch (error) {
+      console.error("Error fetching images:", error);
+      setImages([]);
+    } finally {
+      setIsLoadingImages(false);
+    }
+  }, []);
+
   // Get sources on initial load and when the context section is expanded
   useEffect(() => {
     if (expandedSections.has('context')) {
       fetchSources();
+      fetchImages();
     }
-  }, [expandedSections.has('context'), fetchSources]);
+  }, [expandedSections.has('context'), fetchSources, fetchImages]);
 
   // Refresh sources when refreshTrigger changes (document ingestion)
   useEffect(() => {
@@ -264,12 +302,31 @@ export default function Sidebar({
       newExpandedSections.delete(section);
     } else {
       newExpandedSections.add(section);
-      // Get sources when context section is expanded
+      // Get sources and images when context section is expanded
       if (section === 'context') {
         fetchSources();
+        fetchImages();
       }
     }
     setExpandedSections(newExpandedSections);
+  };
+
+  const handleDeleteImage = async (imageId: string) => {
+    try {
+      const response = await fetch(`/api/image/${imageId}`, {
+        method: "DELETE"
+      });
+
+      if (!response.ok) {
+        console.error("Failed to delete image");
+        return;
+      }
+
+      // Refresh images list
+      await fetchImages();
+    } catch (error) {
+      console.error("Error deleting image:", error);
+    }
   };
 
   const isSectionExpanded = (section: string) => {
@@ -581,7 +638,7 @@ export default function Sidebar({
                     )}
                   </div>
                   <div className={styles.buttonGroup}>
-                    <button 
+                    <button
                       className={styles.uploadDocumentsButton}
                       onClick={() => setShowIngestion(true)}
                       title="Upload Documents"
@@ -601,7 +658,7 @@ export default function Sidebar({
                       </svg>
                       Upload Documents
                     </button>
-                    <button 
+                    <button
                       className={styles.refreshButton}
                       onClick={(e) => {
                         e.preventDefault();
@@ -612,6 +669,48 @@ export default function Sidebar({
                       {isLoadingSources ? "Loading..." : "Refresh Sources"}
                     </button>
                   </div>
+                </div>
+
+                {/* Images Section */}
+                <div className={styles.configItem}>
+                  <label>Uploaded Images</label>
+                  <div className={styles.imagesContainer}>
+                    {isLoadingImages ? (
+                      <div className={styles.loadingText}>Loading images...</div>
+                    ) : images.length === 0 ? (
+                      <div className={styles.noImages}>No images uploaded</div>
+                    ) : (
+                      images.map(image => (
+                        <div key={image.image_id} className={styles.imageItem}>
+                          <div className={styles.imageInfo}>
+                            <span className={styles.imageFilename}>
+                              {image.filename || `Image ${image.image_id.slice(0, 8)}`}
+                            </span>
+                            {image.description && (
+                              <span className={styles.imageDescription}>{image.description}</span>
+                            )}
+                          </div>
+                          <button
+                            className={styles.deleteImageButton}
+                            onClick={() => handleDeleteImage(image.image_id)}
+                            title="Delete image"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <button
+                    className={`${styles.refreshButton} ${styles.refreshImagesButton}`}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      fetchImages();
+                    }}
+                    disabled={isLoadingImages}
+                  >
+                    {isLoadingImages ? "Loading..." : "Refresh Images"}
+                  </button>
                 </div>
               </div>
             </div>

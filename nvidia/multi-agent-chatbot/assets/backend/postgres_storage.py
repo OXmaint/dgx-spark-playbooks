@@ -185,6 +185,22 @@ class PostgreSQLConversationStorage:
                     expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + INTERVAL '1 hour')
                 )
             """)
+
+            # Image metadata table for making model context-aware about available images
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS image_metadata (
+                    image_id VARCHAR(255) PRIMARY KEY,
+                    chat_id VARCHAR(255),
+                    filename VARCHAR(500),
+                    description TEXT,
+                    content_type VARCHAR(100),
+                    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    FOREIGN KEY (image_id) REFERENCES images(image_id) ON DELETE CASCADE
+                )
+            """)
+
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_image_metadata_chat_id ON image_metadata(chat_id)")
             
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_updated_at ON conversations(updated_at)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_images_expires_at ON images(expires_at)")
@@ -448,14 +464,14 @@ class PostgreSQLConversationStorage:
         if cache_entry and not cache_entry.is_expired():
             self._cache_hits += 1
             return cache_entry.data
-        
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("""
-                SELECT image_data FROM images 
+                SELECT image_data FROM images
                 WHERE image_id = $1 AND expires_at > CURRENT_TIMESTAMP
             """, image_id)
             self._db_operations += 1
-            
+
             if row:
                 image_data = row['image_data']
                 self._image_cache[image_id] = CacheEntry(
@@ -465,7 +481,300 @@ class PostgreSQLConversationStorage:
                 )
                 self._cache_misses += 1
                 return image_data
-            
+
+            return None
+
+    async def store_image_with_metadata(
+        self,
+        image_id: str,
+        image_base64: str,
+        chat_id: str = None,
+        filename: str = None,
+        content_type: str = None,
+        persistent: bool = False
+    ) -> None:
+        """Store base64 image data with metadata for context awareness.
+
+        Args:
+            image_id: Unique image identifier
+            image_base64: Base64 encoded image data
+            chat_id: Associated chat identifier
+            filename: Original filename
+            content_type: MIME type of the image
+            persistent: If True, image won't expire (for chat-associated images)
+        """
+        async with self.pool.acquire() as conn:
+            # Store image data with optional persistence
+            if persistent:
+                await conn.execute("""
+                    INSERT INTO images (image_id, image_data, expires_at)
+                    VALUES ($1, $2, NULL)
+                    ON CONFLICT (image_id)
+                    DO UPDATE SET
+                        image_data = EXCLUDED.image_data,
+                        created_at = CURRENT_TIMESTAMP,
+                        expires_at = NULL
+                """, image_id, image_base64)
+            else:
+                await conn.execute("""
+                    INSERT INTO images (image_id, image_data)
+                    VALUES ($1, $2)
+                    ON CONFLICT (image_id)
+                    DO UPDATE SET
+                        image_data = EXCLUDED.image_data,
+                        created_at = CURRENT_TIMESTAMP,
+                        expires_at = CURRENT_TIMESTAMP + INTERVAL '1 hour'
+                """, image_id, image_base64)
+
+            # Store metadata
+            await conn.execute("""
+                INSERT INTO image_metadata (image_id, chat_id, filename, content_type)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (image_id)
+                DO UPDATE SET
+                    chat_id = EXCLUDED.chat_id,
+                    filename = EXCLUDED.filename,
+                    content_type = EXCLUDED.content_type,
+                    uploaded_at = CURRENT_TIMESTAMP
+            """, image_id, chat_id, filename, content_type)
+
+            self._db_operations += 2
+
+        # Cache the image data
+        self._image_cache[image_id] = CacheEntry(
+            data=image_base64,
+            timestamp=time.time(),
+            ttl=3600 if not persistent else 86400  # 24 hours for persistent
+        )
+
+    async def get_image_metadata(self, image_id: str) -> Optional[Dict]:
+        """Get metadata for a specific image.
+
+        Args:
+            image_id: Unique image identifier
+
+        Returns:
+            Dictionary with image metadata or None if not found
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT image_id, chat_id, filename, description, content_type, uploaded_at, is_active
+                FROM image_metadata
+                WHERE image_id = $1
+            """, image_id)
+            self._db_operations += 1
+
+            if row:
+                return {
+                    "image_id": row['image_id'],
+                    "chat_id": row['chat_id'],
+                    "filename": row['filename'],
+                    "description": row['description'],
+                    "content_type": row['content_type'],
+                    "uploaded_at": row['uploaded_at'].isoformat() if row['uploaded_at'] else None,
+                    "is_active": row['is_active']
+                }
+            return None
+
+    async def update_image_description(self, image_id: str, description: str) -> bool:
+        """Update the description for an image.
+
+        Args:
+            image_id: Unique image identifier
+            description: New description text
+
+        Returns:
+            True if updated successfully, False otherwise
+        """
+        async with self.pool.acquire() as conn:
+            result = await conn.execute("""
+                UPDATE image_metadata
+                SET description = $2
+                WHERE image_id = $1
+            """, image_id, description)
+            self._db_operations += 1
+            return "UPDATE 1" in result
+
+    async def list_images(self, limit: int = 50) -> List[Dict]:
+        """List all active images with metadata.
+
+        Args:
+            limit: Maximum number of images to return
+
+        Returns:
+            List of image metadata dictionaries
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT m.image_id, m.chat_id, m.filename, m.description, m.content_type, m.uploaded_at, m.is_active
+                FROM image_metadata m
+                INNER JOIN images i ON m.image_id = i.image_id
+                WHERE m.is_active = TRUE
+                AND (i.expires_at IS NULL OR i.expires_at > CURRENT_TIMESTAMP)
+                ORDER BY m.uploaded_at DESC
+                LIMIT $1
+            """, limit)
+            self._db_operations += 1
+
+            return [
+                {
+                    "image_id": row['image_id'],
+                    "chat_id": row['chat_id'],
+                    "filename": row['filename'],
+                    "description": row['description'],
+                    "content_type": row['content_type'],
+                    "uploaded_at": row['uploaded_at'].isoformat() if row['uploaded_at'] else None,
+                    "is_active": row['is_active']
+                }
+                for row in rows
+            ]
+
+    async def list_images_for_chat(self, chat_id: str) -> List[Dict]:
+        """List all active images for a specific chat.
+
+        Args:
+            chat_id: Chat identifier
+
+        Returns:
+            List of image metadata dictionaries for the chat
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT m.image_id, m.chat_id, m.filename, m.description, m.content_type, m.uploaded_at, m.is_active
+                FROM image_metadata m
+                INNER JOIN images i ON m.image_id = i.image_id
+                WHERE m.chat_id = $1
+                AND m.is_active = TRUE
+                AND (i.expires_at IS NULL OR i.expires_at > CURRENT_TIMESTAMP)
+                ORDER BY m.uploaded_at DESC
+            """, chat_id)
+            self._db_operations += 1
+
+            return [
+                {
+                    "image_id": row['image_id'],
+                    "chat_id": row['chat_id'],
+                    "filename": row['filename'],
+                    "description": row['description'],
+                    "content_type": row['content_type'],
+                    "uploaded_at": row['uploaded_at'].isoformat() if row['uploaded_at'] else None,
+                    "is_active": row['is_active']
+                }
+                for row in rows
+            ]
+
+    async def delete_image(self, image_id: str) -> bool:
+        """Delete an image and its metadata.
+
+        Args:
+            image_id: Unique image identifier
+
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        async with self.pool.acquire() as conn:
+            # Due to CASCADE, deleting from images will also delete from image_metadata
+            result = await conn.execute(
+                "DELETE FROM images WHERE image_id = $1",
+                image_id
+            )
+            self._db_operations += 1
+
+            # Clear from cache
+            self._image_cache.pop(image_id, None)
+
+            return "DELETE 1" in result
+
+    async def deactivate_image(self, image_id: str) -> bool:
+        """Soft delete an image by marking it inactive.
+
+        Args:
+            image_id: Unique image identifier
+
+        Returns:
+            True if deactivated successfully, False otherwise
+        """
+        async with self.pool.acquire() as conn:
+            result = await conn.execute("""
+                UPDATE image_metadata
+                SET is_active = FALSE
+                WHERE image_id = $1
+            """, image_id)
+            self._db_operations += 1
+            return "UPDATE 1" in result
+
+    async def search_images_for_chat(self, chat_id: str, search_term: str) -> List[Dict]:
+        """Search images in a chat by filename or description.
+
+        Args:
+            chat_id: Chat identifier
+            search_term: Term to search for in filename or description
+
+        Returns:
+            List of matching image metadata dictionaries
+        """
+        async with self.pool.acquire() as conn:
+            # Case-insensitive search in filename and description
+            rows = await conn.fetch("""
+                SELECT m.image_id, m.chat_id, m.filename, m.description, m.content_type, m.uploaded_at, m.is_active
+                FROM image_metadata m
+                INNER JOIN images i ON m.image_id = i.image_id
+                WHERE m.chat_id = $1
+                AND m.is_active = TRUE
+                AND (i.expires_at IS NULL OR i.expires_at > CURRENT_TIMESTAMP)
+                AND (
+                    LOWER(m.filename) LIKE LOWER($2)
+                    OR LOWER(m.description) LIKE LOWER($2)
+                )
+                ORDER BY m.uploaded_at DESC
+            """, chat_id, f"%{search_term}%")
+            self._db_operations += 1
+
+            return [
+                {
+                    "image_id": row['image_id'],
+                    "chat_id": row['chat_id'],
+                    "filename": row['filename'],
+                    "description": row['description'],
+                    "content_type": row['content_type'],
+                    "uploaded_at": row['uploaded_at'].isoformat() if row['uploaded_at'] else None,
+                    "is_active": row['is_active']
+                }
+                for row in rows
+            ]
+
+    async def get_image_by_filename(self, chat_id: str, filename: str) -> Optional[Dict]:
+        """Get image metadata by exact filename match within a chat.
+
+        Args:
+            chat_id: Chat identifier
+            filename: Exact filename to match
+
+        Returns:
+            Image metadata dictionary or None if not found
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT m.image_id, m.chat_id, m.filename, m.description, m.content_type, m.uploaded_at, m.is_active
+                FROM image_metadata m
+                INNER JOIN images i ON m.image_id = i.image_id
+                WHERE m.chat_id = $1
+                AND m.filename = $2
+                AND m.is_active = TRUE
+                AND (i.expires_at IS NULL OR i.expires_at > CURRENT_TIMESTAMP)
+            """, chat_id, filename)
+            self._db_operations += 1
+
+            if row:
+                return {
+                    "image_id": row['image_id'],
+                    "chat_id": row['chat_id'],
+                    "filename": row['filename'],
+                    "description": row['description'],
+                    "content_type": row['content_type'],
+                    "uploaded_at": row['uploaded_at'].isoformat() if row['uploaded_at'] else None,
+                    "is_active": row['is_active']
+                }
             return None
 
     async def get_chat_metadata(self, chat_id: str) -> Optional[Dict]:
