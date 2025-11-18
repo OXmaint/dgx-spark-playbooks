@@ -2,6 +2,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 1993-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 """Utility functions for file processing and message conversion."""
 
 import json
@@ -16,26 +28,11 @@ from logger import logger
 from vector_store import VectorStore
 
 
+
 def clean_metadata(metadata: dict) -> dict:
-    """Remove problematic metadata fields that Milvus can't handle.
-    
-    Args:
-        metadata: Original metadata dictionary
-        
-    Returns:
-        Cleaned metadata dictionary safe for Milvus
-    """
+    """Remove problematic metadata fields that Milvus can't handle."""
     # Fields that cause "Unrecognized datatype" errors in Milvus
-    problematic_fields = {
-        'languages', 
-        'emphasized_text_contents', 
-        'emphasized_text_tags',
-        'link_urls',
-        'link_texts',
-        'parent_id',
-        'coordinates',
-        'detection_class_prob'
-    }
+    problematic_fields = ['languages', 'emphasized_text_contents', 'emphasized_text_tags']
     
     cleaned = {}
     for key, value in metadata.items():
@@ -43,15 +40,11 @@ def clean_metadata(metadata: dict) -> dict:
             continue
         # Convert lists/dicts to strings for Milvus compatibility
         if isinstance(value, (list, dict)):
-            cleaned[key] = str(value)[:500]  # Limit length
-        elif isinstance(value, (int, float, str, bool)) or value is None:
-            cleaned[key] = value
+            cleaned[key] = str(value)
         else:
-            # Convert any other type to string
-            cleaned[key] = str(value)[:500]
+            cleaned[key] = value
     
     return cleaned
-
 
 async def process_and_ingest_files_background(
     file_info: List[dict],
@@ -59,8 +52,7 @@ async def process_and_ingest_files_background(
     config_manager,
     task_id: str,
     indexing_tasks: Dict[str, str],
-    collection: Optional[str] = None,
-    doc_type: Optional[str] = None,
+    collection: Optional[str] = None,  # ✅ NEW: target Milvus collection (e.g., "oceanix")
 ) -> None:
     """Process and ingest files in the background.
 
@@ -118,8 +110,15 @@ async def process_and_ingest_files_background(
         logger.debug({"message": "Loading documents", "task_id": task_id})
 
         try:
-            # Use fallback loader with improved error handling
-            documents = _fallback_load_documents(file_paths)
+            # Prefer vector_store's loader if present (backwards-compat with your older implementation)
+            documents: List[Document]
+            load_fn = getattr(vector_store, "_load_documents", None)
+
+            if callable(load_fn):
+                documents = load_fn(file_paths)  # type: ignore[assignment]
+            else:
+                # Fallback loader (minimal + robust)
+                documents = _fallback_load_documents(file_paths)
 
             logger.debug({
                 "message": "Documents loaded, starting indexing",
@@ -129,6 +128,7 @@ async def process_and_ingest_files_background(
             })
 
             indexing_tasks[task_id] = "indexing_documents"
+            # ✅ Route to the requested collection; defaults handled inside index_documents
             vector_store.index_documents(documents, collection_name=collection)
 
             # Update config sources with the new filenames (if not already present)
@@ -171,7 +171,79 @@ async def process_and_ingest_files_background(
         }, exc_info=True)
 
 
-def _fallback_load_documents(file_paths: List[str], doc_type: Optional[str] = None) -> List[Document]:
+# def _fallback_load_documents(file_paths: List[str]) -> List[Document]:
+#     """Minimal, safe loader used only if VectorStore._load_documents is not available."""
+#     docs: List[Document] = []
+#     for file_path in file_paths:
+#         try:
+#             src_name = os.path.basename(file_path)
+#             ext = os.path.splitext(file_path)[1].lower()
+
+#             text: Optional[str] = None
+
+#             # Try Unstructured if available
+#             try:
+#                 from langchain_unstructured import UnstructuredLoader
+#                 loader = UnstructuredLoader(file_path)
+#                 loaded = loader.load()
+#                 for d in loaded:
+#                     # Normalize metadata a bit
+#                     md = d.metadata or {}
+#                     md["source"] = md.get("source") or src_name
+#                     md["file_path"] = file_path
+#                     md["filename"] = src_name
+#                     docs.append(Document(page_content=d.page_content or "", metadata=md))
+#                 continue  # done with this file
+#             except Exception:
+#                 # fall through to manual extraction
+#                 pass
+
+#             # Basic PDF text extraction fallback
+#             if ext == ".pdf":
+#                 try:
+#                     from pypdf import PdfReader
+#                     reader = PdfReader(file_path)
+#                     pages = []
+#                     for p in reader.pages:
+#                         try:
+#                             pages.append(p.extract_text() or "")
+#                         except Exception:
+#                             pages.append("")
+#                     text = "\n\n".join(pages).strip()
+#                 except Exception:
+#                     text = None
+
+#             # Plain text read as last resort
+#             if text is None:
+#                 try:
+#                     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+#                         text = f.read()
+#                 except Exception:
+#                     text = ""
+
+#             # Always produce a Document, even if empty, to keep pipeline robust
+#             md = {
+#                 "source": src_name,
+#                 "file_path": file_path,
+#                 "filename": src_name,
+#             }
+#             content = (text or "").strip()
+#             if not content:
+#                 content = f"Document: {src_name}"
+#             docs.append(Document(page_content=content, metadata=md))
+
+#         except Exception as e:
+#             logger.error({
+#                 "message": "Fallback loader error",
+#                 "file_path": file_path,
+#                 "error": str(e)
+#             }, exc_info=True)
+#             # Skip this file but continue with others
+
+#     return docs
+
+
+def _fallback_load_documents(file_paths: List[str]) -> List[Document]:
     """Minimal, safe loader used only if VectorStore._load_documents is not available."""
     docs: List[Document] = []
     for file_path in file_paths:
@@ -181,26 +253,27 @@ def _fallback_load_documents(file_paths: List[str], doc_type: Optional[str] = No
 
             text: Optional[str] = None
 
-            # Try Unstructured if available - with cleaned metadata
+            # Try Unstructured if available - with better error handling
             try:
                 from langchain_unstructured import UnstructuredLoader
                 
+                # Configure loader to skip language detection and be more robust
                 loader = UnstructuredLoader(
                     file_path,
-                    mode="single",
-                    strategy="fast",
+                    mode="single",  # Process as single document
+                    strategy="fast",  # Fast processing, skip complex analysis
                 )
                 loaded = loader.load()
                 for d in loaded:
-                    # Normalize and clean metadata
+                    # Normalize metadata
                     md = d.metadata or {}
                     md["source"] = md.get("source") or src_name
                     md["file_path"] = file_path
                     md["filename"] = src_name
-                    md = clean_metadata(md)  # ← CRITICAL: Remove problematic fields
+                    md = clean_metadata(md) 
                     docs.append(Document(page_content=d.page_content or "", metadata=md))
                 logger.debug(f"Successfully loaded {src_name} with UnstructuredLoader")
-                continue
+                continue  # done with this file
             except ImportError:
                 logger.debug(f"UnstructuredLoader not available for {src_name}, using fallback")
             except Exception as e:
@@ -259,16 +332,12 @@ def _fallback_load_documents(file_paths: List[str], doc_type: Optional[str] = No
                     logger.warning(f"Text read failed for {src_name}: {str(e)}")
                     text = ""
 
-            # Always produce a Document with clean metadata
+            # Always produce a Document, even if empty, to keep pipeline robust
             md = {
                 "source": src_name,
                 "file_path": file_path,
                 "filename": src_name,
             }
-            if doc_type:
-                md["type"] = doc_type
-            md = clean_metadata(md)  # Clean even basic metadata
-            
             content = (text or "").strip()
             if not content:
                 content = f"Document: {src_name}"
@@ -284,7 +353,7 @@ def _fallback_load_documents(file_paths: List[str], doc_type: Optional[str] = No
             # Create a minimal document to avoid complete failure
             docs.append(Document(
                 page_content=f"Error loading document: {os.path.basename(file_path)}",
-                metadata=clean_metadata({"source": os.path.basename(file_path), "error": str(e)})
+                metadata={"source": os.path.basename(file_path), "error": str(e)}
             ))
 
     return docs

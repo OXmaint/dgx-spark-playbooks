@@ -25,9 +25,22 @@ WORKDIR /app
 RUN . $HOME/.local/bin/env 
 ENV PATH="/root/.local/bin:$PATH"
 
-COPY pyproject.toml uv.lock ./
-COPY . .
+# COPY pyproject.toml uv.lock ./
+# COPY . .
 
+# RUN uv sync
+
+# CMD ["uv", "run", "--", "uvicorn", "main:app", "--reload", "--host", "0.0.0.0", "--port", "8000"]
+
+# copy lockfiles first for caching
+COPY pyproject.toml uv.lock ./
+COPY requirements.txt ./
+
+# install from requirements.txt into system env (no pip)
+RUN uv pip install --system --no-cache -r requirements.txt
+
+# now copy the rest and sync any pyproject deps
+COPY . .
 RUN uv sync
 
 CMD ["uv", "run", "--", "uvicorn", "main:app", "--reload", "--host", "0.0.0.0", "--port", "8000"]

@@ -2,6 +2,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 1993-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 """FastAPI backend server for the chatbot application.
 
 This module provides the main HTTP API endpoints and WebSocket connections for:
@@ -34,7 +46,7 @@ from vector_store import create_vector_store_with_config
 from work_order_summarizer import WorkOrderSummarizer
 from work_order_service import WorkOrderService
 
-from pymilvus import connections, Collection, utility
+from pymilvus import connections, Collection
 import json as _json
 
 
@@ -64,6 +76,36 @@ work_order_service: WorkOrderService | None = None
 agent: ChatAgent | None = None
 indexing_tasks: Dict[str, str] = {}
 
+
+# @asynccontextmanager
+# async def lifespan(app: FastAPI):
+#     """Application lifespan manager for startup and shutdown tasks."""
+#     global agent
+#     logger.debug("Initializing PostgreSQL storage and agent...")
+    
+#     try:
+#         await postgres_storage.init_pool()
+#         logger.info("PostgreSQL storage initialized successfully")
+#         logger.debug("Initializing ChatAgent...")
+#         agent = await ChatAgent.create(
+#             vector_store=vector_store,
+#             config_manager=config_manager,
+#             postgres_storage=postgres_storage
+#         )
+#         logger.info("ChatAgent initialized successfully.")
+#     except Exception as e:
+#         logger.error(f"Failed to initialize PostgreSQL storage: {e}")
+#         raise
+
+#     yield
+    
+#     try:
+#         await postgres_storage.close()
+#         logger.debug("PostgreSQL storage closed successfully")
+#     except Exception as e:
+#         logger.error(f"Error closing PostgreSQL storage: {e}")
+
+#modified the above
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -124,9 +166,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------------------
-# Health
-# ---------------------------------------------------------------------------------------
+# endpoints for work order
 
 @app.get("/health")
 async def health_check():
@@ -171,13 +211,28 @@ async def health_check():
             "error": str(e)
         }
 
-# ---------------------------------------------------------------------------------------
-# Work Order (org-scoped) endpoints
-# ---------------------------------------------------------------------------------------
+
+############################### included the selected metadata, search with organization ##############
 
 @app.post("/work-orders/process")
 async def process_work_order(work_order: Dict[str, Any]):
-    """Process a work order: generate summary and store in organization-specific collection."""
+    """Process a work order: generate summary and store in organization-specific collection.
+    
+    Required fields:
+    - organization_id: Organization identifier
+    - work_order_id: Work order identifier
+    - work_order_type_id: Type of work order
+    - work_order_number: Work order number
+    
+    The work order is stored in Milvus in a collection specific to the organization.
+    Only the summary and metadata are stored (not the original work order).
+    
+    Args:
+        work_order: Work order JSON payload
+        
+    Returns:
+        Processing result with summary and metadata
+    """
     try:
         log_request({
             "organization_id": work_order.get("organization_id"),
@@ -211,7 +266,16 @@ async def process_work_order(work_order: Dict[str, Any]):
 
 @app.get("/work-orders/search")
 async def search_work_orders(organization_id: str, query: str, k: int = 5):
-    """Search work orders within an organization by semantic similarity."""
+    """Search work orders within an organization by semantic similarity.
+    
+    Args:
+        organization_id: Organization to search within
+        query: Search query
+        k: Number of results to return
+        
+    Returns:
+        List of matching work orders
+    """
     try:
         log_request({
             "organization_id": organization_id,
@@ -240,7 +304,11 @@ async def search_work_orders(organization_id: str, query: str, k: int = 5):
 
 @app.get("/work-orders/organizations")
 async def list_organizations():
-    """List all organizations that have work order collections."""
+    """List all organizations that have work order collections.
+    
+    Returns:
+        List of organizations with collection info
+    """
     try:
         if not work_order_service:
             raise HTTPException(
@@ -261,7 +329,14 @@ async def list_organizations():
 
 @app.get("/work-orders/organizations/{organization_id}/stats")
 async def get_organization_stats(organization_id: str):
-    """Get statistics for an organization's work orders."""
+    """Get statistics for an organization's work orders.
+    
+    Args:
+        organization_id: Organization identifier
+        
+    Returns:
+        Statistics for the organization
+    """
     try:
         if not work_order_service:
             raise HTTPException(
@@ -279,23 +354,272 @@ async def get_organization_stats(organization_id: str):
             detail=f"Error getting organization stats: {str(e)}"
         )
 
-# ---------------------------------------------------------------------------------------
-# Generic document ingestion (collection-aware)
-# ---------------------------------------------------------------------------------------
+##########################################################################################################
+
+################################ v1: worked with work_order_service1.py and summarizer1.py ####################
+# @app.post("/work-orders/process")
+# async def process_work_order(work_order: Dict[str, Any]):
+#     """Process a work order: LLM generates summary and extracts important metadata.
+    
+#     The work order is stored in Milvus vector database with:
+#     - Embeddings of the summary for semantic search
+#     - LLM-extracted metadata
+#     - Original JSON payload
+    
+#     Args:
+#         work_order: Work order JSON payload (any structure)
+        
+#     Returns:
+#         Processing result with summary and extracted metadata
+#     """
+#     try:
+#         log_request({"work_order_preview": str(work_order)[:200]}, "/work-orders/process")
+        
+#         if not work_order_service:
+#             raise HTTPException(
+#                 status_code=503,
+#                 detail="Work order service not initialized"
+#             )
+        
+#         result = await work_order_service.process_work_order(work_order)
+        
+#         log_response({
+#             "status": result["status"],
+#             "metadata_fields_extracted": list(result["metadata"].keys())
+#         }, "/work-orders/process")
+        
+#         return result
+        
+#     except Exception as e:
+#         log_error(e, "/work-orders/process")
+#         raise HTTPException(
+#             status_code=500,
+#             detail=f"Error processing work order: {str(e)}"
+#         )
+
+
+# @app.get("/work-orders/stats")
+# async def get_work_order_stats():
+#     """Get statistics about stored work orders."""
+#     try:
+#         if not work_order_service:
+#             raise HTTPException(
+#                 status_code=503,
+#                 detail="Work order service not initialized"
+#             )
+        
+#         stats = await work_order_service.get_work_order_stats()
+#         return stats
+        
+#     except Exception as e:
+#         log_error(e, "/work-orders/stats")
+#         raise HTTPException(
+#             status_code=500,
+#             detail=f"Error getting work order stats: {str(e)}"
+#         )
+
+
+
+# @app.get("/work-orders/search")
+# async def search_work_orders(query: str, k: int = 5):
+#     """Search work orders by similarity to query.
+    
+#     Args:
+#         query: Search query
+#         k: Number of results to return
+        
+#     Returns:
+#         List of matching work orders
+#     """
+#     try:
+#         log_request({"query": query, "k": k}, "/work-orders/search")
+        
+#         if not work_order_service:
+#             raise HTTPException(
+#                 status_code=503,
+#                 detail="Work order service not initialized"
+#             )
+        
+#         results = await work_order_service.search_work_orders(query, k)
+        
+#         log_response({"result_count": len(results)}, "/work-orders/search")
+#         return {"results": results, "count": len(results)}
+        
+#     except Exception as e:
+#         log_error(e, "/work-orders/search")
+#         raise HTTPException(
+#             status_code=500,
+#             detail=f"Error searching work orders: {str(e)}"
+#         )
+
+# @app.get("/work-orders/by-id/{wo_id}")
+# async def get_work_order_by_id(wo_id: str):
+#     """
+#     Fetch the stored summary + metadata + raw JSON for a given work order id.
+#     """
+#     try:
+#         # connect to Milvus
+#         try:
+#             connections.connect(host="milvus", port="19530")
+#         except Exception:
+#             connections.connect(uri="http://milvus:19530")
+
+#         col = Collection("context")
+#         col.load()
+
+#         rows = col.query(
+#             expr=f'id == "{wo_id}"',
+#             output_fields=["pk","id","source","text","raw_work_order"],
+#             limit=10
+#         )
+
+#         # Shape a friendly response (parse raw JSON if present)
+#         payload = []
+#         for r in rows:
+#             item = {
+#                 "pk": r.get("pk"),
+#                 "id": r.get("id"),
+#                 "source": r.get("source"),
+#                 "summary_text": r.get("text"),
+#                 "raw_work_order": None
+#             }
+#             raw = r.get("raw_work_order")
+#             if isinstance(raw, str):
+#                 try:
+#                     item["raw_work_order"] = json.loads(raw)
+#                 except Exception:
+#                     item["raw_work_order"] = raw
+#             payload.append(item)
+
+#         connections.disconnect("default")
+#         return {"count": len(payload), "rows": payload}
+
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Error fetching work order: {e}")
+
+
+# @app.get("/work-orders/by-number/{wo_number}")
+# async def get_work_order_by_number(wo_number: str):
+#     try:
+#         try:
+#             connections.connect(host="milvus", port="19530")
+#         except Exception:
+#             connections.connect(uri="http://milvus:19530")
+
+#         col = Collection("context"); col.load()
+#         rows = col.query(
+#             expr=f'work_order_number == "{wo_number}"',
+#             output_fields=["pk","id","work_order_number","source","text","raw_work_order","chunk_index","chunk_total"],
+#             limit=1000
+#         )
+
+#         out = []
+#         for r in rows:
+#             item = {
+#                 "pk": r.get("pk"),
+#                 "id": r.get("id"),
+#                 "work_order_number": r.get("work_order_number"),
+#                 "source": r.get("source"),
+#                 "chunk_index": r.get("chunk_index"),
+#                 "chunk_total": r.get("chunk_total"),
+#                 "summary_text": r.get("text"),
+#                 "raw_work_order": None
+#             }
+#             raw = r.get("raw_work_order")
+#             if isinstance(raw, str):
+#                 try:
+#                     item["raw_work_order"] = _json.loads(raw)
+#                 except Exception:
+#                     item["raw_work_order"] = raw
+#             out.append(item)
+
+#         connections.disconnect("default")
+#         return {"count": len(out), "rows": out}
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Error fetching work order: {e}")
+
+##################################################################
+
+# endpoints for work order ^
+
+
+@app.websocket("/ws/chat/{chat_id}")
+async def websocket_endpoint(websocket: WebSocket, chat_id: str):
+    """WebSocket endpoint for real-time chat communication.
+    
+    Args:
+        websocket: WebSocket connection
+        chat_id: Unique chat identifier
+    """
+    logger.debug(f"WebSocket connection attempt for chat_id: {chat_id}")
+    try:
+        await websocket.accept()
+        logger.debug(f"WebSocket connection accepted for chat_id: {chat_id}")
+        
+        history_messages = await postgres_storage.get_messages(chat_id)
+        history = [postgres_storage._message_to_dict(msg) for i, msg in enumerate(history_messages) if i != 0]
+        await websocket.send_json({"type": "history", "messages": history})
+        
+        while True:
+            data = await websocket.receive_text()
+            client_message = json.loads(data)
+            new_message = client_message.get("message")
+            image_id = client_message.get("image_id")
+            
+            image_data = None
+            if image_id:
+                image_data = await postgres_storage.get_image(image_id)
+                logger.debug(f"Retrieved image data for image_id: {image_id}, data length: {len(image_data) if image_data else 0}")
+            
+            try:
+                async for event in agent.query(query_text=new_message, chat_id=chat_id, image_data=image_data):
+                    await websocket.send_json(event)
+            except Exception as query_error:
+                logger.error(f"Error in agent.query: {str(query_error)}", exc_info=True)
+                await websocket.send_json({"type": "error", "content": f"Error processing request: {str(query_error)}"})
+        
+            final_messages = await postgres_storage.get_messages(chat_id)
+            final_history = [postgres_storage._message_to_dict(msg) for i, msg in enumerate(final_messages) if i != 0]
+            await websocket.send_json({"type": "history", "messages": final_history})
+            
+    except WebSocketDisconnect:
+        logger.debug(f"Client disconnected from chat {chat_id}")
+    except Exception as e:
+        logger.error(f"WebSocket error for chat {chat_id}: {str(e)}", exc_info=True)
+
+
+@app.post("/upload-image")
+async def upload_image(image: UploadFile = File(...), chat_id: str = Form(...)):
+    """Upload and store an image for chat processing.
+    
+    Args:
+        image: Uploaded image file
+        chat_id: Chat identifier for context
+        
+    Returns:
+        Dictionary with generated image_id
+    """
+    image_data = await image.read()
+    image_base64 = base64.b64encode(image_data).decode('utf-8')
+    data_uri = f"data:{image.content_type};base64,{image_base64}"
+    image_id = str(uuid.uuid4())
+    await postgres_storage.store_image(image_id, data_uri)
+    return {"image_id": image_id}
+
 
 @app.post("/ingest")
-async def ingest_files(
-    background_tasks: BackgroundTasks,
-    files: Optional[List[UploadFile]] = File(None),
-    collection: Optional[str] = Form(None),  # NEW
-    doc_type: Optional[str] = Form(None),
-):
-    """Ingest documents for vector search and RAG (optionally to a specific collection)."""
-    try:
-        log_request({"file_count": len(files) if files else 0, "collection": collection}, "/ingest")
+async def ingest_files(files: Optional[List[UploadFile]] = File(None), background_tasks: BackgroundTasks = None):
+    """Ingest documents for vector search and RAG.
+    
+    Args:
+        files: List of uploaded files to process
+        background_tasks: FastAPI background tasks manager
         
-        if not files:
-            raise HTTPException(status_code=400, detail="No files were uploaded.")
+    Returns:
+        Task information for tracking ingestion progress
+    """
+    try:
+        log_request({"file_count": len(files) if files else 0}, "/ingest")
         
         task_id = str(uuid.uuid4())
         
@@ -315,17 +639,14 @@ async def ingest_files(
             vector_store,
             config_manager,
             task_id,
-            indexing_tasks,
-            collection,  # NEW
-            doc_type
+            indexing_tasks
         )
         
         response = {
             "message": f"Files queued for processing. Indexing {len(files)} files in the background.",
             "files": [file.filename for file in files],
             "status": "queued",
-            "task_id": task_id,
-            "collection": collection or vector_store.default_collection_name(),
+            "task_id": task_id
         }
         
         log_response(response, "/ingest")
@@ -341,81 +662,19 @@ async def ingest_files(
 
 @app.get("/ingest/status/{task_id}")
 async def get_indexing_status(task_id: str):
-    """Get the status of a file ingestion task."""
+    """Get the status of a file ingestion task.
+    
+    Args:
+        task_id: Unique task identifier
+        
+    Returns:
+        Current task status
+    """
     if task_id in indexing_tasks:
         return {"status": indexing_tasks[task_id]}
     else:
         raise HTTPException(status_code=404, detail="Task not found")
 
-# ---------------------------------------------------------------------------------------
-# Collection inspection + search (per-company)
-# ---------------------------------------------------------------------------------------
-
-@app.get("/collections/{collection}/info")
-async def get_collection_info(collection: str, sample: int = 3):
-    """Return existence, num_entities, schema fields, index summary, and a small sample."""
-    coll = "".join(c if c.isalnum() or c == "_" else "_" for c in collection)
-    try:
-        connections.connect(uri=vector_store.uri)
-        exists = utility.has_collection(coll)
-        if not exists:
-            return {"collection": coll, "exists": False}
-
-        c = Collection(coll)
-        c.load()
-        info = {
-            "collection": coll,
-            "exists": True,
-            "num_entities": c.num_entities,
-            "schema_fields": [
-                {"name": f.name, "dtype": str(f.dtype), "is_primary": getattr(f, "is_primary", False)}
-                for f in c.schema.fields
-            ],
-            "indexes": [
-                {"field": idx.field_name, "index_name": idx.index_name, "params": idx.params}
-                for idx in c.indexes
-            ],
-        }
-
-        # Try a tiny sample (adjust output_fields to your schema)
-        try:
-            rows = c.query(
-                expr="id >= 0",
-                limit=max(0, sample),
-                output_fields=["text", "source", "chunk_index", "chunk_total"]
-            )
-            info["sample"] = rows
-        except Exception:
-            info["sample"] = []
-
-        return info
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error reading collection '{coll}': {e}")
-    finally:
-        try:
-            connections.disconnect("default")
-        except Exception:
-            pass
-
-
-@app.get("/collections/{collection}/search")
-async def search_collection(collection: str, query: str, k: int = 5):
-    """Semantic search in a specific collection using the configured embeddings."""
-    try:
-        docs = vector_store.get_documents(query=query, k=k, collection_name=collection)
-        results = []
-        for d in docs:
-            results.append({
-                "text": d.page_content,
-                "metadata": d.metadata,
-            })
-        return {"collection": collection, "query": query, "k": k, "results": results, "count": len(results)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error searching in '{collection}': {e}")
-
-# ---------------------------------------------------------------------------------------
-# Chat + config endpoints (unchanged)
-# ---------------------------------------------------------------------------------------
 
 @app.get("/sources")
 async def get_sources():
@@ -439,7 +698,11 @@ async def get_selected_sources():
 
 @app.post("/selected_sources")
 async def update_selected_sources(selected_sources: List[str]):
-    """Update the selected document sources for RAG."""
+    """Update the selected document sources for RAG.
+    
+    Args:
+        selected_sources: List of source names to use for retrieval
+    """
     try:
         config_manager.updated_selected_sources(selected_sources)
         return {"status": "success", "message": "Selected sources updated successfully"}
@@ -459,7 +722,11 @@ async def get_selected_model():
 
 @app.post("/selected_model")
 async def update_selected_model(request: SelectedModelRequest):
-    """Update the selected LLM model."""
+    """Update the selected LLM model.
+    
+    Args:
+        request: Model selection request with model name
+    """
     try:
         logger.debug(f"Updating selected model to: {request.model}")
         config_manager.updated_selected_model(request.model)
@@ -521,7 +788,11 @@ async def get_chat_id():
 
 @app.post("/chat_id")
 async def update_chat_id(request: ChatIdRequest):
-    """Update the current active chat ID."""
+    """Update the current active chat ID.
+    
+    Args:
+        request: Chat ID update request
+    """
     try:
         config_manager.updated_current_chat_id(request.chat_id)
         return {
@@ -538,7 +809,14 @@ async def update_chat_id(request: ChatIdRequest):
 
 @app.get("/chat/{chat_id}/metadata")
 async def get_chat_metadata(chat_id: str):
-    """Get metadata for a specific chat."""
+    """Get metadata for a specific chat.
+    
+    Args:
+        chat_id: Unique chat identifier
+        
+    Returns:
+        Chat metadata including name
+    """
     try:
         metadata = await postgres_storage.get_chat_metadata(chat_id)
         return metadata
@@ -551,7 +829,11 @@ async def get_chat_metadata(chat_id: str):
 
 @app.post("/chat/rename")
 async def rename_chat(request: ChatRenameRequest):
-    """Rename a chat conversation."""
+    """Rename a chat conversation.
+    
+    Args:
+        request: Chat rename request with chat_id and new_name
+    """
     try:
         await postgres_storage.set_chat_metadata(request.chat_id, request.new_name)
         return {
@@ -589,7 +871,11 @@ async def create_new_chat():
 
 @app.delete("/chat/{chat_id}")
 async def delete_chat(chat_id: str):
-    """Delete a specific chat and its messages."""
+    """Delete a specific chat and its messages.
+    
+    Args:
+        chat_id: Unique chat identifier to delete
+    """
     try:
         success = await postgres_storage.delete_conversation(chat_id)
         
@@ -642,7 +928,11 @@ async def clear_all_chats():
 
 @app.delete("/collections/{collection_name}")
 async def delete_collection(collection_name: str):
-    """Delete a document collection from the vector store."""
+    """Delete a document collection from the vector store.
+    
+    Args:
+        collection_name: Name of the collection to delete
+    """
     try:
         success = vector_store.delete_collection(collection_name)
         if success:
@@ -651,46 +941,6 @@ async def delete_collection(collection_name: str):
             raise HTTPException(status_code=404, detail=f"Collection '{collection_name}' not found or could not be deleted")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting collection: {str(e)}")
-
-
-@app.websocket("/ws/chat/{chat_id}")
-async def websocket_endpoint(websocket: WebSocket, chat_id: str):
-    """WebSocket endpoint for real-time chat communication."""
-    logger.debug(f"WebSocket connection attempt for chat_id: {chat_id}")
-    try:
-        await websocket.accept()
-        logger.debug(f"WebSocket connection accepted for chat_id: {chat_id}")
-        
-        history_messages = await postgres_storage.get_messages(chat_id)
-        history = [postgres_storage._message_to_dict(msg) for i, msg in enumerate(history_messages) if i != 0]
-        await websocket.send_json({"type": "history", "messages": history})
-        
-        while True:
-            data = await websocket.receive_text()
-            client_message = json.loads(data)
-            new_message = client_message.get("message")
-            image_id = client_message.get("image_id")
-            
-            image_data = None
-            if image_id:
-                image_data = await postgres_storage.get_image(image_id)
-                logger.debug(f"Retrieved image data for image_id: {image_id}, data length: {len(image_data) if image_data else 0}")
-            
-            try:
-                async for event in agent.query(query_text=new_message, chat_id=chat_id, image_data=image_data):
-                    await websocket.send_json(event)
-            except Exception as query_error:
-                logger.error(f"Error in agent.query: {str(query_error)}", exc_info=True)
-                await websocket.send_json({"type": "error", "content": f"Error processing request: {str(query_error)}"})
-        
-            final_messages = await postgres_storage.get_messages(chat_id)
-            final_history = [postgres_storage._message_to_dict(msg) for i, msg in enumerate(final_messages) if i != 0]
-            await websocket.send_json({"type": "history", "messages": final_history})
-            
-    except WebSocketDisconnect:
-        logger.debug(f"Client disconnected from chat {chat_id}")
-    except Exception as e:
-        logger.error(f"WebSocket error for chat {chat_id}: {str(e)}", exc_info=True)
 
 
 if __name__ == "__main__":
