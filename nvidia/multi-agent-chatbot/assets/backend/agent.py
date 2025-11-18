@@ -375,10 +375,22 @@ class ChatAgent:
             temperature=0,
             top_p=1,
             stream=True,
+            stream_options={"include_usage": True},
             **tool_params
         )
 
-        llm_output_buffer, tool_calls_buffer = await self._stream_response(stream, self.stream_callback)
+        llm_output_buffer, tool_calls_buffer, usage_info = await self._stream_response(stream, self.stream_callback)
+
+        # Log token usage
+        if usage_info:
+            logger.info({
+                "message": "TOKEN_USAGE",
+                "chat_id": state.get("chat_id"),
+                "model": self.current_model,
+                "prompt_tokens": usage_info.get("prompt_tokens", 0),
+                "completion_tokens": usage_info.get("completion_tokens", 0),
+                "total_tokens": usage_info.get("total_tokens", 0)
+            })
         tool_calls = self._format_tool_calls(tool_calls_buffer)
         raw_output = "".join(llm_output_buffer)
         
@@ -461,21 +473,30 @@ class ChatAgent:
             )
         return tool_calls
 
-    async def _stream_response(self, stream, stream_callback: StreamCallback) -> tuple[List[str], Dict[int, Dict[str, str]]]:
+    async def _stream_response(self, stream, stream_callback: StreamCallback) -> tuple[List[str], Dict[int, Dict[str, str]], Dict]:
         """Process streaming LLM response and extract content and tool calls.
-        
+
         Args:
             stream: Async stream from LLM
             stream_callback: Callback for streaming events
-            
+
         Returns:
-            Tuple of (content_buffer, tool_calls_buffer)
+            Tuple of (content_buffer, tool_calls_buffer, usage_info)
         """
         llm_output_buffer = []
         tool_calls_buffer = {}
+        usage_info = {}
         saw_tool_finish = False
 
         async for chunk in stream:
+            # Capture usage info from the final chunk
+            if hasattr(chunk, "usage") and chunk.usage:
+                usage_info = {
+                    "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0),
+                    "completion_tokens": getattr(chunk.usage, "completion_tokens", 0),
+                    "total_tokens": getattr(chunk.usage, "total_tokens", 0)
+                }
+
             for choice in getattr(chunk, "choices", []) or []:
                 delta = getattr(choice, "delta", None)
                 if not delta:
@@ -505,11 +526,11 @@ class ChatAgent:
                 if finish_reason == "tool_calls":
                     saw_tool_finish = True
                     break
-                    
+
             if saw_tool_finish:
                 break
 
-        return llm_output_buffer, tool_calls_buffer
+        return llm_output_buffer, tool_calls_buffer, usage_info
 
     async def query(self, query_text: str, chat_id: str, image_data: str = None) -> AsyncIterator[Dict[str, Any]]:
         """Process user query and stream response tokens.
@@ -569,6 +590,7 @@ class ChatAgent:
 
             if existing_messages:
                 # Filter out SystemMessages and ensure ToolMessages have valid preceding AIMessage with tool_calls
+                # Also strip image attachments from messages to reduce context size
                 filtered_messages = []
                 last_ai_had_tool_calls = False
 
@@ -576,7 +598,27 @@ class ChatAgent:
                     if isinstance(msg, SystemMessage):
                         continue
                     elif isinstance(msg, AIMessage):
-                        filtered_messages.append(msg)
+                        # Check if message has image attachments and strip them
+                        if hasattr(msg, 'additional_kwargs') and msg.additional_kwargs.get('attachments'):
+                            attachments = msg.additional_kwargs.get('attachments', [])
+                            image_attachments = [a for a in attachments if a.get('type') == 'image']
+                            if image_attachments:
+                                # Create a copy without the full image data, just note that an image was attached
+                                content = msg.content
+                                if content:
+                                    content += "\n\n[This message included an annotated image that was displayed to the user]"
+                                else:
+                                    content = "[This message included an annotated image that was displayed to the user]"
+                                # Create new AIMessage without attachments
+                                cleaned_msg = AIMessage(
+                                    content=content,
+                                    **({"tool_calls": msg.tool_calls} if hasattr(msg, 'tool_calls') and msg.tool_calls else {})
+                                )
+                                filtered_messages.append(cleaned_msg)
+                            else:
+                                filtered_messages.append(msg)
+                        else:
+                            filtered_messages.append(msg)
                         last_ai_had_tool_calls = bool(hasattr(msg, 'tool_calls') and msg.tool_calls)
                     elif isinstance(msg, ToolMessage):
                         # Only include ToolMessage if preceding AIMessage had tool_calls
