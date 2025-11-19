@@ -62,11 +62,22 @@ postgres_storage = PostgreSQLConversationStorage(
 )
 
 @mcp.tool()
-def explain_image(query: str, image: str):
+def explain_image(query: str, image: str, return_bounding_boxes: bool = False):
     """
     This tool is used to understand an image. It will respond to the user's query based on the image.
-    ...
-    """ 
+
+    Args:
+        query: The question or analysis request about the image
+        image: Image input as either:
+               - A file path (e.g., "/path/to/image.jpg")
+               - A base64-encoded data URL (e.g., "data:image/jpeg;base64,...")
+               - A URL to fetch the image from (e.g., "https://example.com/image.jpg")
+        return_bounding_boxes: If True, the response will include bounding box coordinates in JSON format
+                              for detected objects/defects. Format: {"objects": [{"label": "name", "bbox": [x1, y1, x2, y2]}]}
+
+    Returns:
+        Text description of the image, or JSON with bounding boxes if return_bounding_boxes=True
+    """
     if not image:
         raise ValueError('Error: explain_image tool received an empty image string.')
 
@@ -95,22 +106,59 @@ def explain_image(query: str, image: str):
             }
         }
 
+    # Modify query if bounding boxes are requested
+    if return_bounding_boxes:
+        # Use Qwen VL's native grounding format with 0-1000 coordinate range
+        bbox_query = f"""Find all defects in this image with grounding. {query}
+
+Return a JSON object with bounding boxes in the coordinate range [0, 1000].
+
+Format: bbox = [x1, y1, x2, y2] where all values are integers from 0 to 1000:
+- (x1, y1) = top-left corner (0,0 is top-left of image)
+- (x2, y2) = bottom-right corner (1000,1000 is bottom-right of image)
+
+JSON format:
+{{
+    "description": "Brief description",
+    "objects": [
+        {{"label": "name", "bbox": [x1, y1, x2, y2]}}
+    ]
+}}
+
+Example - rust in upper-right, scratch in lower-center:
+{{
+    "description": "Ship hull with damage",
+    "objects": [
+        {{"label": "Rust", "bbox": [700, 100, 900, 300]}},
+        {{"label": "Scratch", "bbox": [400, 700, 600, 850]}}
+    ]
+}}
+
+Rules:
+- Use SMALL, TIGHT boxes around specific defects only
+- Coordinates must be integers 0-1000
+- No overlapping boxes
+- Only JSON output"""
+        actual_query = bbox_query
+    else:
+        actual_query = query
+
     message = [
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": query},
+                {"type": "text", "text": actual_query},
                 image_url_content
             ]
         }
     ]
-    
+
     try:
-        print(f"Sending request to vision model: {query}")
+        print(f"Sending request to vision model: {actual_query[:100]}...")
         response = model_client.chat.completions.create(
             model=model_name,
             messages=message,
-            max_tokens=512,
+            max_tokens=1024 if return_bounding_boxes else 512,
             temperature=0.1
         )
         print(f"Received response from vision model")

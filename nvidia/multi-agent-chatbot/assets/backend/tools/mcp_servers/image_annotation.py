@@ -85,7 +85,8 @@ def annotate_image(
     image: str,
     bounding_boxes: List[List[float]],
     color: Optional[str] = "red",
-    tags: Optional[List[str]] = None
+    tags: Optional[List[str]] = None,
+    coord_format: Optional[str] = "qwen"
 ) -> str:
     """
     Annotate an image with bounding boxes and optional tags using OpenCV.
@@ -95,34 +96,38 @@ def annotate_image(
                - A file path (e.g., "/path/to/image.jpg")
                - A base64-encoded data URL (e.g., "data:image/jpeg;base64,...")
                - A URL to fetch the image from (e.g., "https://example.com/image.jpg")
-        bounding_boxes: List of bounding boxes, where each box is [x1, y1, x2, y2]
-                       representing top-left (x1, y1) and bottom-right (x2, y2) pixel coordinates.
-                       Coordinates should be integers or floats that will be converted to integers.
+        bounding_boxes: List of bounding boxes, where each box is [x1, y1, x2, y2].
+                       (x1, y1) is top-left corner, (x2, y2) is bottom-right corner.
         color: Color for the bounding boxes (default: "red").
                Accepts color names: "red", "green", "blue", "yellow", "cyan", "magenta",
                "white", "black", "orange", "purple", "pink"
                Or hex codes: "#FF0000", "#00FF00", etc.
         tags: Optional list of text labels for each bounding box.
               The tag at index i will be drawn above bounding_boxes[i].
+        coord_format: Coordinate format for bounding boxes (default: "qwen").
+                     - "qwen": Qwen VL format with coordinates in [0, 1000] range
+                     - "normalized": Normalized coordinates in [0, 1] range
+                     - "pixel": Direct pixel coordinates
 
     Returns:
         Base64-encoded data URL of the annotated image (PNG format)
 
     Example:
-        # Annotate local file
+        # Annotate with Qwen VL format [0, 1000] coordinates (default)
         annotate_image(
             image="/path/to/image.jpg",
-            bounding_boxes=[[10, 10, 100, 100], [150, 150, 250, 250]],
+            bounding_boxes=[[100, 200, 300, 500], [600, 100, 800, 400]],
             color="green",
             tags=["Person", "Car"]
         )
 
-        # Annotate image from URL
+        # Annotate with pixel coordinates
         annotate_image(
             image="https://example.com/photo.jpg",
-            bounding_boxes=[[50, 50, 200, 300]],
+            bounding_boxes=[[50, 100, 250, 500]],
             color="#FF5500",
-            tags=["Detected Object"]
+            tags=["Detected Object"],
+            coord_format="pixel"
         )
     """
     if not image:
@@ -172,12 +177,36 @@ def annotate_image(
     if img is None:
         raise ValueError('Error: Failed to load/decode the image')
 
+    # Get image dimensions for coordinate conversion
+    img_height, img_width = img.shape[:2]
+    print(f"[IMAGE_ANNOTATION] Image dimensions: {img_width}x{img_height}", flush=True)
+
     # Convert BGR color
     bgr_color = _color_name_to_bgr(color)
 
     # Draw bounding boxes and tags
     for i, box in enumerate(bounding_boxes):
-        x1, y1, x2, y2 = [int(coord) for coord in box]
+        x1, y1, x2, y2 = box
+
+        # Convert coordinates to pixels based on specified format
+        if coord_format == "normalized":
+            # Normalized coordinates (0.0 to 1.0)
+            x1 = int(x1 * img_width)
+            y1 = int(y1 * img_height)
+            x2 = int(x2 * img_width)
+            y2 = int(y2 * img_height)
+            print(f"[IMAGE_ANNOTATION] Box {i}: Normalized [0-1] {box} -> Pixels [{x1}, {y1}, {x2}, {y2}]", flush=True)
+        elif coord_format == "pixel":
+            # Already pixel coordinates
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            print(f"[IMAGE_ANNOTATION] Box {i}: Pixel coordinates [{x1}, {y1}, {x2}, {y2}]", flush=True)
+        else:
+            # Default: Qwen VL format - coordinates in 0-1000 range
+            x1 = int((x1 / 1000.0) * img_width)
+            y1 = int((y1 / 1000.0) * img_height)
+            x2 = int((x2 / 1000.0) * img_width)
+            y2 = int((y2 / 1000.0) * img_height)
+            print(f"[IMAGE_ANNOTATION] Box {i}: Qwen [0-1000] {box} -> Pixels [{x1}, {y1}, {x2}, {y2}]", flush=True)
 
         # Draw rectangle with thickness 3
         cv2.rectangle(img, (x1, y1), (x2, y2), bgr_color, thickness=3)

@@ -101,20 +101,34 @@ CRITICAL RULES:
 
 - **DO NOT** try to answer questions from documents yourself - always use the search_documents tool
 
-ANNOTATE_IMAGE TOOL USAGE:
-The annotate_image tool draws bounding boxes with optional labels on images using OpenCV. It accepts:
-- **image**: Can be a file path, base64 data URL, OR a URL (http/https) to fetch the image from
-- **bounding_boxes**: List of [x1, y1, x2, y2] coordinates where (x1, y1) is top-left and (x2, y2) is bottom-right in pixels
-- **color**: Color name ("red", "green", "blue", "yellow", "cyan", "magenta", "white", "black", "orange", "purple", "pink") or hex code ("#FF0000")
-- **tags**: Optional list of labels for each bounding box (tags[i] labels bounding_boxes[i])
+IMAGE ANNOTATION WORKFLOW:
+When the user asks to annotate, highlight, or mark objects/defects in an image, you MUST follow this two-step process:
 
-Example tool call:
+**Step 1**: First call explain_image with return_bounding_boxes=True to get actual object locations from the vision model:
+explain_image({
+    "query": "Identify all defects/objects in this image",
+    "image": "https://example.com/image.jpg",
+    "return_bounding_boxes": true
+})
+
+The vision model will return JSON with coordinates in [0, 1000] range:
+{"description": "...", "objects": [{"label": "Corrosion", "bbox": [100, 200, 350, 500]}]}
+
+**Step 2**: Then call annotate_image using the EXACT coordinates from the explain_image response:
 annotate_image({
     "image": "https://example.com/image.jpg",
-    "bounding_boxes": [[100, 50, 300, 400], [350, 100, 500, 350]],
-    "color": "green",
-    "tags": ["Person", "Car"]
+    "bounding_boxes": [[100, 200, 350, 500]],  // Use EXACT coordinates from Step 1
+    "color": "red",
+    "tags": ["Corrosion"]  // Use labels from Step 1
 })
+
+CRITICAL: NEVER fabricate or guess bounding box coordinates. You MUST get them from explain_image first.
+
+ANNOTATE_IMAGE TOOL PARAMETERS:
+- **image**: Can be a file path, base64 data URL, OR a URL (http/https) to fetch the image from
+- **bounding_boxes**: List of [x1, y1, x2, y2] coordinates in [0, 1000] range. (x1, y1) is top-left, (x2, y2) is bottom-right. The tool automatically converts to pixels.
+- **color**: Color name ("red", "green", "blue", "yellow", "cyan", "magenta", "white", "black", "orange", "purple", "pink") or hex code ("#FF0000")
+- **tags**: Optional list of labels for each bounding box (tags[i] labels bounding_boxes[i])
 
 Batching policy:
 - **Batch** when: (a) calls are independent (e.g., weather in two cities), (b) calls target different tools without dependency, or (c) multiple calls to the same tool with different arguments.
@@ -145,14 +159,14 @@ Assistant (tool calls in one message):
 - get_weather({"location": "Egypt"})
 - get_rain_forecast({"location": "Malibu"})
 
-# Staged dependent calls
-User: Analyze this image and then annotate the detected objects
-Assistant (first message; dependent plan):
-- explain_image({"query": "Identify all objects in this image and their locations", "image": "data:image/jpeg;base64,/9j/..."})
-# (Wait for ToolMessage with object detection results)
-Assistant (after ToolMessage):
-- annotate_image({"image": "data:image/jpeg;base64,/9j/...", "bounding_boxes": [[50, 50, 200, 200], [250, 100, 400, 300]], "color": "green", "tags": ["Car", "Person"]})
-# (Then produce final answer)
+# Staged dependent calls - Image annotation (MUST use this pattern)
+User: Analyze this image and annotate any defects you find
+Assistant (first message - get bounding boxes from vision model):
+- explain_image({"query": "Identify all defects in this image", "image": "data:image/jpeg;base64,/9j/...", "return_bounding_boxes": true})
+# (Wait for ToolMessage with JSON: {"description": "...", "objects": [{"label": "Rust", "bbox": [120, 100, 340, 310]}, {"label": "Crack", "bbox": [400, 190, 550, 400]}]})
+Assistant (after ToolMessage - use EXACT coordinates from response):
+- annotate_image({"image": "data:image/jpeg;base64,/9j/...", "bounding_boxes": [[120, 100, 340, 310], [400, 190, 550, 400]], "color": "red", "tags": ["Rust", "Crack"]})
+# (Then produce final answer describing what was annotated)
 
 # Using successful tool results
 User: Can you search NVIDIA's earnings document and summarize the key points?

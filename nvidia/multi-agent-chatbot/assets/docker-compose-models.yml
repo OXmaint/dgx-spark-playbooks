@@ -52,7 +52,7 @@ services:
   #     - "--top-p"
   #     - "0.95"
 
-  # Qwen3-VL-30B Vision Language Model (for image understanding)
+  # Qwen3-VL-30B Vision Language Model - INSTRUCT version (better for grounding/detection)
   qwen3-vl:
     <<: *build-base
     container_name: qwen3-vl
@@ -69,9 +69,9 @@ services:
               capabilities: [gpu]
     command:
       - "-m"
-      - "/models/qwen3-vl-30b-a3b-thinking-Q5_K_M.gguf"
+      - "/models/qwen3-vl-30b-a3b-instruct-Q5_K_M.gguf"
       - "--mmproj"
-      - "/models/mmproj-qwen3-vl-30b-a3b-thinking-f16.gguf"
+      - "/models/mmproj-qwen3-vl-30b-a3b-instruct-f16.gguf"
       - "--port"
       - "8000"
       - "--host"
@@ -85,6 +85,40 @@ services:
       - "0.7"
       - "--top-p"
       - "0.95"
+
+  # Qwen3-VL-30B Vision Language Model - THINKING version (fallback for complex reasoning)
+  # qwen3-vl-thinking:
+  #   <<: *build-base
+  #   container_name: qwen3-vl-thinking
+  #   ports:
+  #     - "8005:8000"    # Different port for fallback
+  #   volumes:
+  #     - ./models:/models
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
+  #   command:
+  #     - "-m"
+  #     - "/models/qwen3-vl-30b-a3b-thinking-Q5_K_M.gguf"
+  #     - "--mmproj"
+  #     - "/models/mmproj-qwen3-vl-30b-a3b-thinking-f16.gguf"
+  #     - "--port"
+  #     - "8000"
+  #     - "--host"
+  #     - "0.0.0.0"
+  #     - "-c"
+  #     - "32768"                  # 32K context
+  #     - "--n-gpu-layers"
+  #     - "999"                    # Full GPU offload
+  #     - "--jinja"                # For Qwen chat templates
+  #     - "--temp"
+  #     - "0.7"
+  #     - "--top-p"
+  #     - "0.95"
 
   # Option 2: Qwen2.5-VL with TensorRT-LLM (fallback if Qwen3-VL doesn't work)
   # qwen2.5-vl:
