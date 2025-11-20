@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 import glob
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Optional
 import os
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_milvus import Milvus
@@ -282,43 +282,81 @@ class VectorStore:
             }, exc_info=True)
 
 
-    def get_documents(self, query: str, k: int = 8, sources: List[str] = None) -> List[Document]:
+    def get_documents(
+        self,
+        query: str,
+        k: int = 8,
+        sources: List[str] = None,
+        organization: str = None,
+        filters: Dict[str, str] = None
+    ) -> List[Document]:
         """
         Get relevant documents using the retriever's invoke method.
+
+        Args:
+            query: Search query text
+            k: Number of documents to retrieve
+            sources: List of source names to filter by (legacy parameter)
+            organization: Organization/cluster name to search within
+            filters: Additional key-value filter expressions (e.g., {"type": "docs", "category": "safety"})
+
+        Returns:
+            List of relevant documents
         """
         try:
             search_kwargs = {"k": k}
-            
-            if sources:
+            filter_conditions = []
+
+            # Handle organization parameter (takes precedence over sources)
+            if organization:
+                filter_conditions.append(f'source == "{organization}"')
+                logger.debug(f"Filtering by organization: {organization}")
+            elif sources:
+                # Legacy sources parameter support
                 if len(sources) == 1:
-                    filter_expr = f'source == "{sources[0]}"'
+                    filter_conditions.append(f'source == "{sources[0]}"')
                 else:
                     source_conditions = [f'source == "{source}"' for source in sources]
-                    filter_expr = " || ".join(source_conditions)
-                
+                    filter_conditions.append(f'({" || ".join(source_conditions)})')
+                logger.debug(f"Filtering by sources: {sources}")
+
+            # Handle additional filter expressions
+            if filters:
+                for key, value in filters.items():
+                    # Escape the value and create filter expression
+                    filter_conditions.append(f'{key} == "{value}"')
+                logger.debug(f"Additional filters: {filters}")
+
+            # Combine all filter conditions with AND logic
+            if filter_conditions:
+                filter_expr = " && ".join(filter_conditions)
                 search_kwargs["expr"] = filter_expr
                 logger.debug({
                     "message": "Retrieving with filter",
                     "filter": filter_expr
                 })
-            
+
             retriever = self._store.as_retriever(
                 search_type="similarity",
                 search_kwargs=search_kwargs
             )
-            
+
             docs = retriever.invoke(query)
             logger.debug({
                 "message": "Retrieved documents",
                 "query": query,
-                "document_count": len(docs)
+                "document_count": len(docs),
+                "organization": organization,
+                "filters": filters
             })
-            
+
             return docs
         except Exception as e:
             logger.error({
                 "message": "Error retrieving documents",
-                "error": str(e)
+                "error": str(e),
+                "organization": organization,
+                "filters": filters
             }, exc_info=True)
             return []
 

@@ -37,3 +37,9 @@ class SelectedModelRequest(BaseModel):
 class ImageDescriptionRequest(BaseModel):
     image_id: str
     description: str
+
+class BatchAnalysisRequest(BaseModel):
+    image_ids: List[str]
+    analysis_prompt: str
+    report_format: Optional[str] = "markdown"
+    organization: Optional[str] = None

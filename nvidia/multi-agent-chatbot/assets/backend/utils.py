@@ -180,3 +180,38 @@ def convert_langgraph_messages_to_openai(messages: List) -> List[Dict[str, Any]]
             })
     
     return openai_messages
+
+
+async def process_batch_analysis_background(
+    batch_id: str,
+    image_ids: List[str],
+    analysis_prompt: str,
+    report_format: str,
+    batch_agent,
+    batch_tasks: Dict[str, str],
+    organization: str = None
+) -> None:
+    """Background task for processing batch image analysis.
+
+    Args:
+        batch_id: Unique batch identifier
+        image_ids: List of image IDs to process
+        analysis_prompt: The prompt for analysis
+        report_format: Output format for the report
+        batch_agent: BatchAnalysisAgent instance
+        batch_tasks: Dictionary to track task status
+        organization: Optional organization/source name for vector search filtering
+    """
+    try:
+        batch_tasks[batch_id] = "processing"
+        await batch_agent.process_batch(
+            batch_id=batch_id,
+            image_ids=image_ids,
+            analysis_prompt=analysis_prompt,
+            report_format=report_format,
+            organization=organization
+        )
+        batch_tasks[batch_id] = "completed"
+    except Exception as e:
+        logger.error(f"Batch analysis failed: {e}")
+        batch_tasks[batch_id] = f"failed: {str(e)}"

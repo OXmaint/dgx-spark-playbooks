@@ -204,6 +204,37 @@ class PostgreSQLConversationStorage:
             
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_updated_at ON conversations(updated_at)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_images_expires_at ON images(expires_at)")
+
+            # Batch analysis tables
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS batch_analysis_jobs (
+                    batch_id VARCHAR(255) PRIMARY KEY,
+                    status VARCHAR(50) NOT NULL DEFAULT 'queued',
+                    total_images INTEGER NOT NULL DEFAULT 0,
+                    processed_count INTEGER NOT NULL DEFAULT 0,
+                    analysis_prompt TEXT,
+                    report_format VARCHAR(50) DEFAULT 'markdown',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    error_message TEXT
+                )
+            """)
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS batch_analysis_results (
+                    result_id VARCHAR(255) PRIMARY KEY,
+                    batch_id VARCHAR(255) NOT NULL,
+                    image_id VARCHAR(255) NOT NULL,
+                    image_filename VARCHAR(500),
+                    analysis_result TEXT,
+                    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    error_message TEXT,
+                    FOREIGN KEY (batch_id) REFERENCES batch_analysis_jobs(batch_id) ON DELETE CASCADE
+                )
+            """)
+
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_batch_results_batch_id ON batch_analysis_results(batch_id)")
             
             await conn.execute("""
                 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -882,3 +913,211 @@ class PostgreSQLConversationStorage:
         import asyncio
         message_objects = [self._dict_to_message(msg) for msg in messages]
         return asyncio.create_task(self.save_messages(chat_id, message_objects))
+
+    # Batch Analysis Methods
+
+    async def create_batch_job(
+        self,
+        batch_id: str,
+        total_images: int,
+        analysis_prompt: str,
+        report_format: str = "markdown"
+    ) -> None:
+        """Create a new batch analysis job.
+
+        Args:
+            batch_id: Unique batch identifier
+            total_images: Total number of images to process
+            analysis_prompt: The prompt to use for analyzing each image
+            report_format: Output format (markdown, html, pdf)
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO batch_analysis_jobs (batch_id, total_images, analysis_prompt, report_format, status)
+                VALUES ($1, $2, $3, $4, 'queued')
+            """, batch_id, total_images, analysis_prompt, report_format)
+            self._db_operations += 1
+
+    async def update_batch_progress(
+        self,
+        batch_id: str,
+        processed_count: int,
+        status: str = "processing"
+    ) -> None:
+        """Update batch job progress.
+
+        Args:
+            batch_id: Batch identifier
+            processed_count: Number of images processed so far
+            status: Current status (queued, processing, completed, failed)
+        """
+        async with self.pool.acquire() as conn:
+            if status == "completed":
+                await conn.execute("""
+                    UPDATE batch_analysis_jobs
+                    SET processed_count = $2, status = $3, updated_at = CURRENT_TIMESTAMP, completed_at = CURRENT_TIMESTAMP
+                    WHERE batch_id = $1
+                """, batch_id, processed_count, status)
+            else:
+                await conn.execute("""
+                    UPDATE batch_analysis_jobs
+                    SET processed_count = $2, status = $3, updated_at = CURRENT_TIMESTAMP
+                    WHERE batch_id = $1
+                """, batch_id, processed_count, status)
+            self._db_operations += 1
+
+    async def set_batch_error(self, batch_id: str, error_message: str) -> None:
+        """Mark a batch job as failed with error message.
+
+        Args:
+            batch_id: Batch identifier
+            error_message: Error description
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE batch_analysis_jobs
+                SET status = 'failed', error_message = $2, updated_at = CURRENT_TIMESTAMP
+                WHERE batch_id = $1
+            """, batch_id, error_message)
+            self._db_operations += 1
+
+    async def store_batch_result(
+        self,
+        result_id: str,
+        batch_id: str,
+        image_id: str,
+        image_filename: str,
+        analysis_result: str,
+        error_message: str = None
+    ) -> None:
+        """Store analysis result for a single image in the batch.
+
+        Args:
+            result_id: Unique result identifier
+            batch_id: Batch identifier
+            image_id: Image identifier
+            image_filename: Original filename
+            analysis_result: The analysis text from the model
+            error_message: Optional error if analysis failed
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO batch_analysis_results (result_id, batch_id, image_id, image_filename, analysis_result, error_message)
+                VALUES ($1, $2, $3, $4, $5, $6)
+            """, result_id, batch_id, image_id, image_filename, analysis_result, error_message)
+            self._db_operations += 1
+
+    async def get_batch_job(self, batch_id: str) -> Optional[Dict]:
+        """Get batch job details.
+
+        Args:
+            batch_id: Batch identifier
+
+        Returns:
+            Batch job details or None if not found
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT batch_id, status, total_images, processed_count, analysis_prompt,
+                       report_format, created_at, updated_at, completed_at, error_message
+                FROM batch_analysis_jobs
+                WHERE batch_id = $1
+            """, batch_id)
+            self._db_operations += 1
+
+            if row:
+                return {
+                    "batch_id": row['batch_id'],
+                    "status": row['status'],
+                    "total_images": row['total_images'],
+                    "processed_count": row['processed_count'],
+                    "analysis_prompt": row['analysis_prompt'],
+                    "report_format": row['report_format'],
+                    "created_at": row['created_at'].isoformat() if row['created_at'] else None,
+                    "updated_at": row['updated_at'].isoformat() if row['updated_at'] else None,
+                    "completed_at": row['completed_at'].isoformat() if row['completed_at'] else None,
+                    "error_message": row['error_message'],
+                    "progress_percent": round((row['processed_count'] / row['total_images'] * 100) if row['total_images'] > 0 else 0, 1)
+                }
+            return None
+
+    async def get_batch_results(self, batch_id: str) -> List[Dict]:
+        """Get all results for a batch job.
+
+        Args:
+            batch_id: Batch identifier
+
+        Returns:
+            List of analysis results
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT result_id, batch_id, image_id, image_filename, analysis_result, processed_at, error_message
+                FROM batch_analysis_results
+                WHERE batch_id = $1
+                ORDER BY processed_at ASC
+            """, batch_id)
+            self._db_operations += 1
+
+            return [
+                {
+                    "result_id": row['result_id'],
+                    "batch_id": row['batch_id'],
+                    "image_id": row['image_id'],
+                    "image_filename": row['image_filename'],
+                    "analysis_result": row['analysis_result'],
+                    "processed_at": row['processed_at'].isoformat() if row['processed_at'] else None,
+                    "error_message": row['error_message']
+                }
+                for row in rows
+            ]
+
+    async def list_batch_jobs(self, limit: int = 50) -> List[Dict]:
+        """List all batch jobs.
+
+        Args:
+            limit: Maximum number of jobs to return
+
+        Returns:
+            List of batch job summaries
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT batch_id, status, total_images, processed_count, report_format,
+                       created_at, completed_at
+                FROM batch_analysis_jobs
+                ORDER BY created_at DESC
+                LIMIT $1
+            """, limit)
+            self._db_operations += 1
+
+            return [
+                {
+                    "batch_id": row['batch_id'],
+                    "status": row['status'],
+                    "total_images": row['total_images'],
+                    "processed_count": row['processed_count'],
+                    "report_format": row['report_format'],
+                    "created_at": row['created_at'].isoformat() if row['created_at'] else None,
+                    "completed_at": row['completed_at'].isoformat() if row['completed_at'] else None,
+                    "progress_percent": round((row['processed_count'] / row['total_images'] * 100) if row['total_images'] > 0 else 0, 1)
+                }
+                for row in rows
+            ]
+
+    async def delete_batch_job(self, batch_id: str) -> bool:
+        """Delete a batch job and all its results.
+
+        Args:
+            batch_id: Batch identifier
+
+        Returns:
+            True if deleted, False otherwise
+        """
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM batch_analysis_jobs WHERE batch_id = $1",
+                batch_id
+            )
+            self._db_operations += 1
+            return "DELETE 1" in result

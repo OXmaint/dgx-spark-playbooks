@@ -35,11 +35,13 @@ from fastapi import FastAPI, File, Form, UploadFile, HTTPException, BackgroundTa
 from fastapi.middleware.cors import CORSMiddleware
 
 from agent import ChatAgent
+from batch_agent import BatchAnalysisAgent
 from config import ConfigManager
 from logger import logger, log_request, log_response, log_error
-from models import ChatIdRequest, ChatRenameRequest, SelectedModelRequest, ImageDescriptionRequest
+from models import ChatIdRequest, ChatRenameRequest, SelectedModelRequest, ImageDescriptionRequest, BatchAnalysisRequest
 from postgres_storage import PostgreSQLConversationStorage
-from utils import process_and_ingest_files_background
+from report_generator import ReportGenerator
+from utils import process_and_ingest_files_background, process_batch_analysis_background
 from vector_store import create_vector_store_with_config
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
@@ -63,15 +65,18 @@ vector_store = create_vector_store_with_config(config_manager)
 vector_store._initialize_store()
 
 agent: ChatAgent | None = None
+batch_agent: BatchAnalysisAgent | None = None
+report_generator: ReportGenerator | None = None
 indexing_tasks: Dict[str, str] = {}
+batch_tasks: Dict[str, str] = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown tasks."""
-    global agent
+    global agent, batch_agent, report_generator
     logger.debug("Initializing PostgreSQL storage and agent...")
-    
+
     try:
         await postgres_storage.init_pool()
         logger.info("PostgreSQL storage initialized successfully")
@@ -82,12 +87,27 @@ async def lifespan(app: FastAPI):
             postgres_storage=postgres_storage
         )
         logger.info("ChatAgent initialized successfully.")
+
+        # Initialize batch analysis agent
+        logger.debug("Initializing BatchAnalysisAgent...")
+        batch_agent = BatchAnalysisAgent(
+            vector_store=vector_store,
+            config_manager=config_manager,
+            postgres_storage=postgres_storage
+        )
+        await batch_agent.init_tools()
+        logger.info("BatchAnalysisAgent initialized successfully.")
+
+        # Initialize report generator
+        report_generator = ReportGenerator(postgres_storage)
+        logger.info("ReportGenerator initialized successfully.")
+
     except Exception as e:
         logger.error(f"Failed to initialize PostgreSQL storage: {e}")
         raise
 
     yield
-    
+
     try:
         await postgres_storage.close()
         logger.debug("PostgreSQL storage closed successfully")
@@ -692,6 +712,297 @@ async def delete_image(image_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting image: {str(e)}")
+
+
+# Batch Analysis Endpoints
+
+@app.post("/batch-analyze")
+async def create_batch_analysis(
+    request: BatchAnalysisRequest,
+    background_tasks: BackgroundTasks
+):
+    """Create a new batch image analysis job.
+
+    Args:
+        request: Batch analysis request with image IDs and prompt
+        background_tasks: FastAPI background tasks manager
+
+    Returns:
+        Batch job information for tracking
+    """
+    try:
+        if not request.image_ids:
+            raise HTTPException(status_code=400, detail="No image IDs provided")
+
+        if len(request.image_ids) > 20:
+            raise HTTPException(status_code=400, detail="Maximum 20 images per batch")
+
+        batch_id = str(uuid.uuid4())
+
+        # Queue the batch processing task
+        batch_tasks[batch_id] = "queued"
+
+        background_tasks.add_task(
+            process_batch_analysis_background,
+            batch_id,
+            request.image_ids,
+            request.analysis_prompt,
+            request.report_format,
+            batch_agent,
+            batch_tasks,
+            request.organization
+        )
+
+        logger.info(f"Batch analysis queued: {batch_id} with {len(request.image_ids)} images")
+
+        return {
+            "batch_id": batch_id,
+            "status": "queued",
+            "total_images": len(request.image_ids),
+            "analysis_prompt": request.analysis_prompt,
+            "report_format": request.report_format
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating batch analysis: {e}")
+        raise HTTPException(status_code=500, detail=f"Error creating batch analysis: {str(e)}")
+
+
+@app.post("/batch-analyze/upload")
+async def create_batch_analysis_with_upload(
+    files: List[UploadFile] = File(...),
+    analysis_prompt: str = Form(...),
+    report_format: str = Form("markdown"),
+    organization: str = Form(None),
+    background_tasks: BackgroundTasks = None
+):
+    """Create a batch analysis job by uploading images directly.
+
+    Args:
+        files: List of image files to analyze
+        analysis_prompt: The prompt for analysis
+        report_format: Output format (markdown, html)
+        background_tasks: FastAPI background tasks manager
+
+    Returns:
+        Batch job information for tracking
+    """
+    try:
+        if not files:
+            raise HTTPException(status_code=400, detail="No files provided")
+
+        if len(files) > 20:
+            raise HTTPException(status_code=400, detail="Maximum 20 images per batch")
+
+        # Upload and store all images first
+        image_ids = []
+        for file in files:
+            image_data = await file.read()
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            data_uri = f"data:{file.content_type};base64,{image_base64}"
+            image_id = str(uuid.uuid4())
+
+            await postgres_storage.store_image_with_metadata(
+                image_id=image_id,
+                image_base64=data_uri,
+                chat_id=None,  # Not associated with a chat
+                filename=file.filename,
+                content_type=file.content_type,
+                persistent=True
+            )
+            image_ids.append(image_id)
+
+        batch_id = str(uuid.uuid4())
+
+        # Queue the batch processing task
+        batch_tasks[batch_id] = "queued"
+
+        background_tasks.add_task(
+            process_batch_analysis_background,
+            batch_id,
+            image_ids,
+            analysis_prompt,
+            report_format,
+            batch_agent,
+            batch_tasks,
+            organization
+        )
+
+        logger.info(f"Batch analysis with upload queued: {batch_id} with {len(image_ids)} images")
+
+        return {
+            "batch_id": batch_id,
+            "status": "queued",
+            "total_images": len(image_ids),
+            "image_ids": image_ids,
+            "analysis_prompt": analysis_prompt,
+            "report_format": report_format
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating batch analysis with upload: {e}")
+        raise HTTPException(status_code=500, detail=f"Error creating batch analysis: {str(e)}")
+
+
+@app.get("/batch-analyze/{batch_id}/status")
+async def get_batch_status(batch_id: str):
+    """Get the status of a batch analysis job.
+
+    Args:
+        batch_id: Batch identifier
+
+    Returns:
+        Current batch job status and progress
+    """
+    try:
+        # Get from database for detailed status
+        batch_job = await postgres_storage.get_batch_job(batch_id)
+
+        if not batch_job:
+            # Check in-memory tasks
+            if batch_id in batch_tasks:
+                return {"batch_id": batch_id, "status": batch_tasks[batch_id]}
+            raise HTTPException(status_code=404, detail=f"Batch job {batch_id} not found")
+
+        return batch_job
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting batch status: {str(e)}")
+
+
+@app.get("/batch-analyze/{batch_id}/results")
+async def get_batch_results(batch_id: str):
+    """Get the results of a completed batch analysis.
+
+    Args:
+        batch_id: Batch identifier
+
+    Returns:
+        List of analysis results for each image
+    """
+    try:
+        batch_job = await postgres_storage.get_batch_job(batch_id)
+        if not batch_job:
+            raise HTTPException(status_code=404, detail=f"Batch job {batch_id} not found")
+
+        results = await postgres_storage.get_batch_results(batch_id)
+
+        return {
+            "batch_id": batch_id,
+            "status": batch_job["status"],
+            "total_images": batch_job["total_images"],
+            "processed_count": batch_job["processed_count"],
+            "results": results
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting batch results: {str(e)}")
+
+
+@app.get("/batch-analyze/{batch_id}/report")
+async def get_batch_report(
+    batch_id: str,
+    format: str = "markdown",
+    include_images: bool = True
+):
+    """Generate and return the analysis report for a batch job.
+
+    Args:
+        batch_id: Batch identifier
+        format: Report format (markdown, html)
+        include_images: Whether to embed images in the report
+
+    Returns:
+        Generated report content
+    """
+    try:
+        batch_job = await postgres_storage.get_batch_job(batch_id)
+        if not batch_job:
+            raise HTTPException(status_code=404, detail=f"Batch job {batch_id} not found")
+
+        if batch_job["status"] != "completed":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Batch job not completed. Current status: {batch_job['status']}"
+            )
+
+        report_content = await report_generator.generate_report(
+            batch_id=batch_id,
+            format=format,
+            include_images=include_images
+        )
+
+        # Determine content type based on format
+        if format == "html":
+            content_type = "text/html"
+        else:
+            content_type = "text/markdown"
+
+        from fastapi.responses import Response
+        return Response(
+            content=report_content,
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f"attachment; filename=report_{batch_id[:8]}.{format if format != 'markdown' else 'md'}"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating report: {str(e)}")
+
+
+@app.get("/batch-analyze")
+async def list_batch_jobs(limit: int = 50):
+    """List all batch analysis jobs.
+
+    Args:
+        limit: Maximum number of jobs to return
+
+    Returns:
+        List of batch job summaries
+    """
+    try:
+        jobs = await postgres_storage.list_batch_jobs(limit=limit)
+        return {"batch_jobs": jobs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing batch jobs: {str(e)}")
+
+
+@app.delete("/batch-analyze/{batch_id}")
+async def delete_batch_job(batch_id: str):
+    """Delete a batch analysis job and its results.
+
+    Args:
+        batch_id: Batch identifier
+
+    Returns:
+        Success status
+    """
+    try:
+        success = await postgres_storage.delete_batch_job(batch_id)
+
+        # Also clean up in-memory tracking
+        batch_tasks.pop(batch_id, None)
+
+        if success:
+            return {"status": "success", "message": f"Batch job {batch_id} deleted successfully"}
+        else:
+            raise HTTPException(status_code=404, detail=f"Batch job {batch_id} not found")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting batch job: {str(e)}")
 
 
 if __name__ == "__main__":
