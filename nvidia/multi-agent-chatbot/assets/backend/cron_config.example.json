@@ -1,0 +1,7 @@
+{
+  "external_api_get_url": "https://your-external-api.com/api/v1/documents/vision_analysis",
+  "external_api_post_url": "https://your-external-api.com/api/v1/documents/vision_analysis/upload",
+  "external_api_key": "your_jwt_token_here",
+  "backend_api_url": "http://localhost:8000",
+  "organization_id": "your_organization_id"
+}

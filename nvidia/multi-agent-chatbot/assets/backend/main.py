@@ -37,8 +37,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from agent import ChatAgent
 from batch_agent import BatchAnalysisAgent
 from config import ConfigManager
+from cron_manager import CronJobManager
 from logger import logger, log_request, log_response, log_error
-from models import ChatIdRequest, ChatRenameRequest, SelectedModelRequest, ImageDescriptionRequest, BatchAnalysisRequest
+from models import ChatIdRequest, ChatRenameRequest, SelectedModelRequest, ImageDescriptionRequest, BatchAnalysisRequest, CronJobRequest, CronJobUpdateRequest
 from postgres_storage import PostgreSQLConversationStorage
 from report_generator import ReportGenerator
 from utils import process_and_ingest_files_background, process_batch_analysis_background
@@ -67,6 +68,7 @@ vector_store._initialize_store()
 agent: ChatAgent | None = None
 batch_agent: BatchAnalysisAgent | None = None
 report_generator: ReportGenerator | None = None
+cron_manager: CronJobManager | None = None
 indexing_tasks: Dict[str, str] = {}
 batch_tasks: Dict[str, str] = {}
 
@@ -74,7 +76,7 @@ batch_tasks: Dict[str, str] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown tasks."""
-    global agent, batch_agent, report_generator
+    global agent, batch_agent, report_generator, cron_manager
     logger.debug("Initializing PostgreSQL storage and agent...")
 
     try:
@@ -102,6 +104,12 @@ async def lifespan(app: FastAPI):
         report_generator = ReportGenerator(postgres_storage)
         logger.info("ReportGenerator initialized successfully.")
 
+        # Initialize cron job manager
+        logger.debug("Initializing CronJobManager...")
+        cron_manager = CronJobManager(postgres_storage)
+        await cron_manager.restore_jobs_from_database()
+        logger.info("CronJobManager initialized successfully.")
+
     except Exception as e:
         logger.error(f"Failed to initialize PostgreSQL storage: {e}")
         raise
@@ -109,6 +117,8 @@ async def lifespan(app: FastAPI):
     yield
 
     try:
+        if cron_manager:
+            cron_manager.shutdown()
         await postgres_storage.close()
         logger.debug("PostgreSQL storage closed successfully")
     except Exception as e:
@@ -249,18 +259,18 @@ async def upload_image(image: UploadFile = File(...), chat_id: str = Form(...)):
 
 
 @app.post("/ingest")
-async def ingest_files(files: Optional[List[UploadFile]] = File(None), background_tasks: BackgroundTasks = None):
-    """Ingest documents for vector search and RAG.
-    
-    Args:
-        files: List of uploaded files to process
-        background_tasks: FastAPI background tasks manager
-        
-    Returns:
-        Task information for tracking ingestion progress
-    """
+async def ingest_files(
+    background_tasks: BackgroundTasks,
+    files: Optional[List[UploadFile]] = File(None),
+    collection: Optional[str] = Form(None),  # NEW
+    doc_types: Optional[List[str]] = Form(None),
+):
+    """Ingest documents for vector search and RAG (optionally to a specific collection)."""
     try:
-        log_request({"file_count": len(files) if files else 0}, "/ingest")
+        log_request({"file_count": len(files) if files else 0, "collection": collection}, "/ingest")
+        
+        if not files:
+            raise HTTPException(status_code=400, detail="No files were uploaded.")
         
         task_id = str(uuid.uuid4())
         
@@ -280,14 +290,17 @@ async def ingest_files(files: Optional[List[UploadFile]] = File(None), backgroun
             vector_store,
             config_manager,
             task_id,
-            indexing_tasks
+            indexing_tasks,
+            collection,
+            doc_types
         )
         
         response = {
             "message": f"Files queued for processing. Indexing {len(files)} files in the background.",
             "files": [file.filename for file in files],
             "status": "queued",
-            "task_id": task_id
+            "task_id": task_id,
+            "collection": collection or vector_store.default_collection_name(),
         }
         
         log_response(response, "/ingest")
@@ -750,10 +763,13 @@ async def create_batch_analysis(
             request.report_format,
             batch_agent,
             batch_tasks,
-            request.organization
+            request.organization,
+            request.descriptions_map
         )
 
         logger.info(f"Batch analysis queued: {batch_id} with {len(request.image_ids)} images")
+        if request.descriptions_map:
+            logger.info(f"Using descriptions for {len(request.descriptions_map)} images")
 
         return {
             "batch_id": batch_id,
@@ -776,6 +792,7 @@ async def create_batch_analysis_with_upload(
     analysis_prompt: str = Form(...),
     report_format: str = Form("markdown"),
     organization: str = Form(None),
+    descriptions_json: str = Form(None),
     background_tasks: BackgroundTasks = None
 ):
     """Create a batch analysis job by uploading images directly.
@@ -784,6 +801,8 @@ async def create_batch_analysis_with_upload(
         files: List of image files to analyze
         analysis_prompt: The prompt for analysis
         report_format: Output format (markdown, html)
+        organization: Optional organization/source name for vector search filtering
+        descriptions_json: Optional JSON string with {filename: description} mapping
         background_tasks: FastAPI background tasks manager
 
     Returns:
@@ -795,6 +814,18 @@ async def create_batch_analysis_with_upload(
 
         if len(files) > 20:
             raise HTTPException(status_code=400, detail="Maximum 20 images per batch")
+
+        # Parse descriptions JSON if provided
+        descriptions_map = None
+        if descriptions_json:
+            try:
+                descriptions_map = json.loads(descriptions_json)
+                logger.info(f"Loaded descriptions for {len(descriptions_map)} images")
+            except json.JSONDecodeError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid JSON in descriptions_json: {str(e)}"
+                )
 
         # Upload and store all images first
         image_ids = []
@@ -827,10 +858,13 @@ async def create_batch_analysis_with_upload(
             report_format,
             batch_agent,
             batch_tasks,
-            organization
+            organization,
+            descriptions_map
         )
 
         logger.info(f"Batch analysis with upload queued: {batch_id} with {len(image_ids)} images")
+        if descriptions_map:
+            logger.info(f"Using descriptions for {len(descriptions_map)} images")
 
         return {
             "batch_id": batch_id,
@@ -1003,6 +1037,174 @@ async def delete_batch_job(batch_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting batch job: {str(e)}")
+
+
+# Cron Job Management Endpoints
+
+@app.post("/cron-jobs")
+async def create_cron_job(request: CronJobRequest):
+    """Create a new cron job for automated batch processing.
+
+    Args:
+        request: Cron job configuration
+
+    Returns:
+        Created job details with job_id
+    """
+    try:
+        job_id = await cron_manager.create_cron_job(
+            name=request.name,
+            schedule=request.schedule,
+            external_api_get_url=request.external_api_get_url,
+            external_api_post_url=request.external_api_post_url,
+            external_api_key=request.external_api_key,
+            backend_api_url=request.backend_api_url,
+            organization_id=request.organization_id,
+            enabled=request.enabled
+        )
+
+        return {
+            "status": "success",
+            "job_id": job_id,
+            "name": request.name,
+            "schedule": request.schedule,
+            "enabled": request.enabled
+        }
+
+    except Exception as e:
+        logger.error(f"Error creating cron job: {e}")
+        raise HTTPException(status_code=500, detail=f"Error creating cron job: {str(e)}")
+
+
+@app.get("/cron-jobs")
+async def list_cron_jobs(enabled_only: bool = False):
+    """List all cron jobs.
+
+    Args:
+        enabled_only: Only return enabled jobs
+
+    Returns:
+        List of cron jobs
+    """
+    try:
+        jobs = await cron_manager.list_cron_jobs(enabled_only=enabled_only)
+        return {"cron_jobs": jobs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing cron jobs: {str(e)}")
+
+
+@app.get("/cron-jobs/{job_id}")
+async def get_cron_job(job_id: str):
+    """Get details of a specific cron job.
+
+    Args:
+        job_id: Cron job ID
+
+    Returns:
+        Job details including schedule and next run time
+    """
+    try:
+        job = await cron_manager.get_cron_job(job_id)
+
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Cron job {job_id} not found")
+
+        return job
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting cron job: {str(e)}")
+
+
+@app.post("/cron-jobs/{job_id}/activate")
+async def activate_cron_job(job_id: str):
+    """Activate (enable) a cron job.
+
+    Args:
+        job_id: Cron job ID
+
+    Returns:
+        Success status
+    """
+    try:
+        success = await cron_manager.activate_cron_job(job_id)
+
+        if success:
+            return {"status": "success", "message": f"Cron job {job_id} activated"}
+        else:
+            raise HTTPException(status_code=404, detail=f"Cron job {job_id} not found")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error activating cron job: {str(e)}")
+
+
+@app.post("/cron-jobs/{job_id}/deactivate")
+async def deactivate_cron_job(job_id: str):
+    """Deactivate (disable) a cron job.
+
+    Args:
+        job_id: Cron job ID
+
+    Returns:
+        Success status
+    """
+    try:
+        success = await cron_manager.deactivate_cron_job(job_id)
+
+        if success:
+            return {"status": "success", "message": f"Cron job {job_id} deactivated"}
+        else:
+            raise HTTPException(status_code=404, detail=f"Cron job {job_id} not found")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deactivating cron job: {str(e)}")
+
+
+@app.delete("/cron-jobs/{job_id}")
+async def delete_cron_job(job_id: str):
+    """Delete a cron job.
+
+    Args:
+        job_id: Cron job ID
+
+    Returns:
+        Success status
+    """
+    try:
+        success = await cron_manager.delete_cron_job(job_id)
+
+        if success:
+            return {"status": "success", "message": f"Cron job {job_id} deleted"}
+        else:
+            raise HTTPException(status_code=404, detail=f"Cron job {job_id} not found")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting cron job: {str(e)}")
+
+
+@app.get("/cron-jobs/{job_id}/executions")
+async def get_cron_job_executions(job_id: str, limit: int = 50):
+    """Get execution history for a cron job.
+
+    Args:
+        job_id: Cron job ID
+        limit: Maximum number of executions to return
+
+    Returns:
+        List of execution records
+    """
+    try:
+        executions = await cron_manager.get_job_executions(job_id, limit=limit)
+        return {"job_id": job_id, "executions": executions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting job executions: {str(e)}")
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 class ChatConfig(BaseModel):
     sources: List[str]
@@ -43,3 +43,22 @@ class BatchAnalysisRequest(BaseModel):
     analysis_prompt: str
     report_format: Optional[str] = "markdown"
     organization: Optional[str] = None
+    descriptions_map: Optional[Dict[str, str]] = None  # {filename: description} mapping
+
+class CronJobRequest(BaseModel):
+    name: str
+    schedule: str  # Cron expression: "minute hour day month day_of_week"
+    external_api_get_url: str
+    external_api_post_url: str
+    external_api_key: str
+    backend_api_url: Optional[str] = "http://localhost:8000"
+    organization_id: str
+    enabled: Optional[bool] = True
+
+class CronJobUpdateRequest(BaseModel):
+    enabled: Optional[bool] = None
+    schedule: Optional[str] = None
+    external_api_get_url: Optional[str] = None
+    external_api_post_url: Optional[str] = None
+    external_api_key: Optional[str] = None
+    organization_id: Optional[str] = None

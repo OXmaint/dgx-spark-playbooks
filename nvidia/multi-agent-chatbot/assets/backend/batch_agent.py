@@ -99,7 +99,12 @@ class BatchAnalysisAgent:
         else:
             raise ValueError(f"Model {model_name} is not available. Available: {available_models}")
 
-    async def get_image_description(self, image_data: str, user_prompt: str) -> str:
+    async def get_image_description(
+        self,
+        image_data: str,
+        user_prompt: str,
+        additional_context: Optional[str] = None
+    ) -> str:
         """Get detailed description of an image using the vision model.
 
         The user's prompt is passed directly to the vision model so it can answer
@@ -108,6 +113,7 @@ class BatchAnalysisAgent:
         Args:
             image_data: Base64 encoded image data
             user_prompt: User's analysis prompt - sent directly to vision model
+            additional_context: Optional additional context/description about the image
 
         Returns:
             Detailed image description/analysis from vision model
@@ -122,7 +128,16 @@ class BatchAnalysisAgent:
             # This allows specific queries like "find the word DANGER" to be answered
             vision_query = f"""Analyze this image and respond to the following request:
 
-{user_prompt}
+{user_prompt}"""
+
+            # Add additional context if provided
+            if additional_context:
+                vision_query += f"""
+
+Additional context about this image:
+{additional_context}"""
+
+            vision_query += """
 
 In your response:
 1. First, address the specific request above with detailed findings
@@ -163,7 +178,7 @@ In your response:
             results = self.vector_store.get_documents(
                 search_query,
                 k=3,
-                organization=organization
+                collection_name=organization
             )
 
             if results:
@@ -247,7 +262,8 @@ Please synthesize this information into a clear, comprehensive analysis report f
         image_data: str,
         filename: str,
         analysis_prompt: str,
-        organization: Optional[str] = None
+        organization: Optional[str] = None,
+        additional_context: Optional[str] = None
     ) -> str:
         """Complete analysis pipeline for a single image.
 
@@ -257,13 +273,20 @@ Please synthesize this information into a clear, comprehensive analysis report f
             filename: Original filename
             analysis_prompt: User's analysis prompt
             organization: Optional organization/source name for vector search
+            additional_context: Optional additional context/description about the image
 
         Returns:
             Complete analysis result
         """
-        # Step 1: Get image description from vision model (with user's prompt)
+        # Step 1: Get image description from vision model (with user's prompt and optional context)
         logger.info(f"Step 1: Getting visual analysis for {filename}")
-        image_description = await self.get_image_description(image_data, analysis_prompt)
+        if additional_context:
+            logger.info(f"Using additional context for {filename}: {additional_context[:100]}...")
+        image_description = await self.get_image_description(
+            image_data,
+            analysis_prompt,
+            additional_context
+        )
 
         # Step 2: Get relevant context from vector store
         logger.info(f"Step 2: Retrieving relevant context for {filename}")
@@ -286,7 +309,8 @@ Please synthesize this information into a clear, comprehensive analysis report f
         image_ids: List[str],
         analysis_prompt: str,
         report_format: str = "markdown",
-        organization: Optional[str] = None
+        organization: Optional[str] = None,
+        descriptions_map: Optional[Dict[str, str]] = None
     ) -> None:
         """Process a batch of images and store results.
 
@@ -296,10 +320,13 @@ Please synthesize this information into a clear, comprehensive analysis report f
             analysis_prompt: The prompt to use for analyzing each image
             report_format: Output format for the report
             organization: Optional organization/source name for vector search filtering
+            descriptions_map: Optional mapping of {filename: description} for additional context
         """
         logger.info(f"Starting batch analysis {batch_id} with {len(image_ids)} images")
         if organization:
             logger.info(f"Using organization filter for vector search: {organization}")
+        if descriptions_map:
+            logger.info(f"Using descriptions map with {len(descriptions_map)} entries")
 
         # Create the batch job record
         await self.storage.create_batch_job(
@@ -343,13 +370,20 @@ Please synthesize this information into a clear, comprehensive analysis report f
 
                     logger.info(f"[Batch {batch_id}] Processing image {i+1}/{len(image_ids)}: {filename}")
 
+                    # Check if we have additional context for this image
+                    additional_context = None
+                    if descriptions_map and filename in descriptions_map:
+                        additional_context = descriptions_map[filename]
+                        logger.info(f"[Batch {batch_id}] Using description for {filename}")
+
                     # Run the complete analysis pipeline
                     analysis_result = await self.analyze_single_image(
                         image_id,
                         image_data,
                         filename,
                         analysis_prompt,
-                        organization
+                        organization,
+                        additional_context
                     )
 
                     # Store the result

@@ -15,18 +15,16 @@
 # limitations under the License.
 #
 import glob
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Optional, Callable, Dict
 import os
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_milvus import Milvus
 from langchain_core.documents import Document
-from typing_extensions import List
-from langchain_openai import OpenAIEmbeddings
 from langchain_unstructured import UnstructuredLoader
 from dotenv import load_dotenv
 from logger import logger
-from typing import Optional, Callable
 import requests
+from pymilvus import connections, Collection
 
 
 class CustomEmbeddings:
@@ -48,11 +46,10 @@ class CustomEmbeddings:
             embeddings.append(data["data"][0]["embedding"])
         return embeddings
 
-    
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of document texts. Required by Milvus library."""
         return self.__call__(texts)
-    
+
     def embed_query(self, text: str) -> list[float]:
         """Embed a single query text. Required by Milvus library."""
         return self.__call__([text])[0]
@@ -60,58 +57,107 @@ class CustomEmbeddings:
 
 class VectorStore:
     """Vector store for document embedding and retrieval.
-    
-    Decoupled from ConfigManager - uses optional callbacks for source management.
+
+    Modifications:
+      • Supports upsert-by-id (auto-delete existing rows)
+      • Allows disabling chunking (one row per work order)
+      • NEW: Target any Milvus collection by name (per company)
     """
-    
+
     def __init__(
-        self, 
-        embeddings=None, 
+        self,
+        embeddings=None,
         uri: str = "http://milvus:19530",
-        on_source_deleted: Optional[Callable[[str], None]] = None
+        on_source_deleted: Optional[Callable[[str], None]] = None,
     ):
-        """Initialize the vector store.
-        
-        Args:
-            embeddings: Embedding model to use (defaults to OllamaEmbeddings)
-            uri: Milvus connection URI
-            on_source_deleted: Optional callback when a source is deleted
-        """
         try:
             self.embeddings = embeddings or CustomEmbeddings(model="qwen3-embedding-custom")
             self.uri = uri
             self.on_source_deleted = on_source_deleted
             self._initialize_store()
-            
+
+            # cache per-collection langchain stores
+            self._stores: Dict[str, Milvus] = {"context": self._store}
+
+            # splitter for generic document ingestion
             self.text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
-                chunk_overlap=200
+                chunk_size=1000, chunk_overlap=200
             )
-            
-            logger.debug({
-                "message": "VectorStore initialized successfully"
-            })
+
+            logger.debug({"message": "VectorStore initialized successfully"})
         except Exception as e:
-            logger.error({
-                "message": "Error initializing VectorStore",
-                "error": str(e)
-            }, exc_info=True)
+            logger.error(
+                {"message": "Error initializing VectorStore", "error": str(e)}, exc_info=True
+            )
             raise
-    
+
+    # ---------------------------------------------------------------------- #
+    #   Core store setup / connection
+    # ---------------------------------------------------------------------- #
     def _initialize_store(self):
         self._store = Milvus(
             embedding_function=self.embeddings,
             collection_name="context",
             connection_args={"uri": self.uri},
-            auto_id=True
+            auto_id=True,
         )
-        logger.debug({
-            "message": "Milvus vector store initialized",
-            "uri": self.uri,
-            "collection": "context"
-        })
+        logger.debug(
+            {
+                "message": "Milvus vector store initialized",
+                "uri": self.uri,
+                "collection": "context",
+            }
+        )
 
-    def _load_documents(self, file_paths: List[str] = None, input_dir: str = None) -> List[str]:
+    def default_collection_name(self) -> str:
+        return "context"
+
+    def _sanitize_collection(self, name: str) -> str:
+        return "".join(c if c.isalnum() or c == "_" else "_" for c in name)
+
+    def _get_store_for(self, collection_name: Optional[str] = None) -> Milvus:
+        """Return a langchain Milvus wrapper for the requested collection. Lazily creates if needed."""
+        name = self.default_collection_name() if not collection_name else self._sanitize_collection(collection_name)
+        if name in self._stores:
+            return self._stores[name]
+
+        store = Milvus(
+            embedding_function=self.embeddings,
+            collection_name=name,
+            connection_args={"uri": self.uri},
+            auto_id=True,
+        )
+        self._stores[name] = store
+        logger.debug({"message": "Milvus store ready", "collection": name})
+        return store
+
+    # ---------------------------------------------------------------------- #
+    #   Internal helpers
+    # ---------------------------------------------------------------------- #
+    def _predelete_ids(self, ids: set[str], collection_name: Optional[str] = None):
+        """Delete any existing rows for these logical ids in the target collection."""
+        if not ids:
+            return
+        target = self.default_collection_name() if not collection_name else self._sanitize_collection(collection_name)
+        try:
+            connections.connect(uri=self.uri)
+            col = Collection(target)
+            col.load()
+            for wo_id in ids:
+                col.delete(expr=f'id == "{wo_id}"')
+                logger.debug(f"Deleted existing rows for id={wo_id} in collection={target}")
+        except Exception as e:
+            logger.warning(f"Pre-delete failed in {target}: {e}")
+        finally:
+            try:
+                connections.disconnect("default")
+            except Exception:
+                pass
+
+    # ---------------------------------------------------------------------- #
+    #   Indexing
+    # ---------------------------------------------------------------------- #
+    def _load_documents(self, file_paths: List[str] = None, input_dir: str = None, doc_types: List[str] = None) -> List[str]:
         try:
             documents = []
             source_name = None
@@ -192,7 +238,7 @@ class VectorStore:
                                 }
                             )]
                     
-                    for doc in docs:
+                    for i, doc in enumerate(docs):
                         if not doc.metadata:
                             doc.metadata = {}
                         
@@ -200,6 +246,7 @@ class VectorStore:
                         cleaned_metadata["source"] = source_name
                         cleaned_metadata["file_path"] = file_path
                         cleaned_metadata["filename"] = os.path.basename(file_path)
+                        cleaned_metadata["type"] = doc_types[i]
                         
                         for key, value in doc.metadata.items():
                             if key not in ["source", "file_path"]:
@@ -232,194 +279,206 @@ class VectorStore:
                 "error": str(e)
             }, exc_info=True)
             raise
-
-    def index_documents(self, documents: List[Document]) -> List[Document]:
+    
+    def index_documents(
+        self,
+        documents: List[Document],
+        no_split: bool = False,
+        upsert_by_id: bool = True,
+        echo: bool = False,
+        collection_name: Optional[str] = None,   # NEW
+    ):
+        """Index documents into Milvus (optionally to a specific collection)."""
         try:
-            logger.debug({
-                "message": "Starting document indexing",
-                "document_count": len(documents)
-            })
-            
-            splits = self.text_splitter.split_documents(documents)
-            logger.debug({
-                "message": "Split documents into chunks",
-                "chunk_count": len(splits)
-            })
-            
-            self._store.add_documents(splits)
+            target = self.default_collection_name() if not collection_name else self._sanitize_collection(collection_name)
+            logger.debug(
+                {"message": "Starting document indexing", "document_count": len(documents), "collection": target}
+            )
+
+            # chunking control
+            splits = documents if no_split else self.text_splitter.split_documents(documents)
+
+            # annotate chunk indices
+            chunk_total = len(splits)
+            for i, d in enumerate(splits):
+                d.metadata = d.metadata or {}
+                d.metadata["chunk_index"] = i
+                d.metadata["chunk_total"] = chunk_total
+
+            # collect logical ids for upsert
+            ids = {d.metadata.get("id") for d in splits if d.metadata.get("id")}
+            if upsert_by_id and ids:
+                self._predelete_ids(ids, collection_name=target)
+
+            # insert into target collection
+            store = self._get_store_for(target)
+            store.add_documents(splits)
             self.flush_store()
-            
-            logger.debug({
-                "message": "Document indexing completed"
-            })            
+
+            logger.debug(
+                {
+                    "message": "Document indexing completed",
+                    "chunks_written": len(splits),
+                    "upsert_ids": list(ids),
+                    "collection": target,
+                }
+            )
+
+            return splits if echo else None
         except Exception as e:
-            logger.error({
-                "message": "Error during document indexing",
-                "error": str(e)
-            }, exc_info=True)
+            logger.error(
+                {"message": "Error during document indexing", "error": str(e)}, exc_info=True
+            )
             raise
 
+    # ---------------------------------------------------------------------- #
+    #   Flush / persistence
+    # ---------------------------------------------------------------------- #
     def flush_store(self):
+        """Flush the Milvus collection(s) to persist documents."""
+        try:
+            from pymilvus import utility
+            connections.connect(uri=self.uri)
+            utility.flush_all()
+            logger.debug({"message": "Milvus store flushed"})
+        except Exception as e:
+            logger.error({"message": "Error flushing Milvus store", "error": str(e)}, exc_info=True)
+        finally:
+            try:
+                connections.disconnect("default")
+            except Exception:
+                pass
+
+    # ---------------------------------------------------------------------- #
+    #   Retrieval
+    # ---------------------------------------------------------------------- #
+    def view_documents(
+        self,
+        collection_name: Optional[str] = None
+    ) -> List[Dict]:
         """
-        Flush the Milvus collection to ensure that all added documents are persisted to disk.
+        View all documents and their metadata from the specified collection.
+        If collection_name is not provided, uses the default collection.
+
+        Returns:
+            List of dicts with 'content', 'metadata', and 'collection' keys.
         """
         try:
-            from pymilvus import connections
-            
-            connections.connect(uri=self.uri)
-            
-
-            from pymilvus import utility
-            utility.flush_all()
-            
+            target = self.default_collection_name() if not collection_name else self._sanitize_collection(collection_name)
+            store = self._get_store_for(target)
+            # Attempt to access internal docs; fallback to _docs attribute or empty.
+            if hasattr(store, "docs"):
+                docs = store.docs
+            elif hasattr(store, "_docs"):
+                docs = store._docs
+            else:
+                # If the document retrieval interface is different, try as_data_frame for Milvus.
+                try:
+                    docs = []
+                    milvus_collection = Collection(name=target)
+                    milvus_collection.load()
+                    df = milvus_collection.query(expr=None, output_fields=["content", "metadata"])
+                    for row in df:
+                        docs.append(Document(page_content=row.get("content", ""), metadata=row.get("metadata", {})))
+                except Exception:
+                    docs = []
+            result = []
+            for doc in docs:
+                result.append({
+                    "content": getattr(doc, 'page_content', getattr(doc, 'content', "")),
+                    "metadata": getattr(doc, 'metadata', {}),
+                    "collection": target,
+                })
             logger.debug({
-                "message": "Milvus store flushed (persisted to disk)"
+                "message": "Viewed documents",
+                "collection": target,
+                "document_count": len(result)
             })
+            return result
         except Exception as e:
             logger.error({
-                "message": "Error flushing Milvus store",
-                "error": str(e)
+                "message": "Error viewing documents",
+                "error": str(e),
+                "collection": collection_name
             }, exc_info=True)
-
-
+            return []
+    
+    
     def get_documents(
         self,
         query: str,
         k: int = 8,
-        sources: List[str] = None,
-        organization: str = None,
-        filters: Dict[str, str] = None
+        sources: Optional[List[str]] = None,
+        collection_name: Optional[str] = None, 
+        doc_type: Optional[str] = 'document', # NEW
     ) -> List[Document]:
-        """
-        Get relevant documents using the retriever's invoke method.
-
-        Args:
-            query: Search query text
-            k: Number of documents to retrieve
-            sources: List of source names to filter by (legacy parameter)
-            organization: Organization/cluster name to search within
-            filters: Additional key-value filter expressions (e.g., {"type": "docs", "category": "safety"})
-
-        Returns:
-            List of relevant documents
-        """
+        """Retrieve similar documents by embedding similarity from a target collection."""
         try:
+            target = self.default_collection_name() if not collection_name else self._sanitize_collection(collection_name)
             search_kwargs = {"k": k}
-            filter_conditions = []
-
-            # Handle organization parameter (takes precedence over sources)
-            if organization:
-                filter_conditions.append(f'source == "{organization}"')
-                logger.debug(f"Filtering by organization: {organization}")
-            elif sources:
-                # Legacy sources parameter support
+            filter_expr = ""
+            if sources:
                 if len(sources) == 1:
-                    filter_conditions.append(f'source == "{sources[0]}"')
+                    filter_expr = f'source == "{sources[0]}"'
                 else:
-                    source_conditions = [f'source == "{source}"' for source in sources]
-                    filter_conditions.append(f'({" || ".join(source_conditions)})')
-                logger.debug(f"Filtering by sources: {sources}")
+                    source_conditions = [f'source == "{s}"' for s in sources]
+                    filter_expr = " || ".join(source_conditions)
+            
+            if doc_type:
+                if filter_expr:
+                    filter_expr += " && "
+                filter_expr += f'type == "{doc_type}"'
+            
+            search_kwargs["expr"] = filter_expr
 
-            # Handle additional filter expressions
-            if filters:
-                for key, value in filters.items():
-                    # Escape the value and create filter expression
-                    filter_conditions.append(f'{key} == "{value}"')
-                logger.debug(f"Additional filters: {filters}")
-
-            # Combine all filter conditions with AND logic
-            if filter_conditions:
-                filter_expr = " && ".join(filter_conditions)
-                search_kwargs["expr"] = filter_expr
-                logger.debug({
-                    "message": "Retrieving with filter",
-                    "filter": filter_expr
-                })
-
-            retriever = self._store.as_retriever(
-                search_type="similarity",
-                search_kwargs=search_kwargs
+            retriever = self._get_store_for(target).as_retriever(
+                search_type="similarity", search_kwargs=search_kwargs
             )
-
             docs = retriever.invoke(query)
-            logger.debug({
-                "message": "Retrieved documents",
-                "query": query,
-                "document_count": len(docs),
-                "organization": organization,
-                "filters": filters
-            })
-
+            logger.debug({"message": "Retrieved documents", "query": query, "count": len(docs), "collection": target})
             return docs
         except Exception as e:
-            logger.error({
-                "message": "Error retrieving documents",
-                "error": str(e),
-                "organization": organization,
-                "filters": filters
-            }, exc_info=True)
+            logger.error({"message": "Error retrieving documents", "error": str(e)}, exc_info=True)
             return []
 
+    # ---------------------------------------------------------------------- #
+    #   Delete collection
+    # ---------------------------------------------------------------------- #
     def delete_collection(self, collection_name: str) -> bool:
-        """
-        Delete a collection from Milvus.
-        
-        Args:
-            collection_name: Name of the collection to delete
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
+        """Delete a collection from Milvus."""
         try:
-            from pymilvus import connections, Collection, utility
-            
+            from pymilvus import utility
+
             connections.connect(uri=self.uri)
-            
             if utility.has_collection(collection_name):
-                collection = Collection(name=collection_name)
-                
-                collection.drop()
-                
+                Collection(name=collection_name).drop()
                 if self.on_source_deleted:
                     self.on_source_deleted(collection_name)
-                
-                logger.debug({
-                    "message": "Collection deleted successfully",
-                    "collection_name": collection_name
-                })
+                logger.debug({"message": "Collection deleted", "name": collection_name})
                 return True
-            else:
-                logger.warning({
-                    "message": "Collection not found",
-                    "collection_name": collection_name
-                })
-                return False
-        except Exception as e:
-            logger.error({
-                "message": "Error deleting collection",
-                "collection_name": collection_name,
-                "error": str(e)
-            }, exc_info=True)
+            logger.warning({"message": "Collection not found", "name": collection_name})
             return False
+        except Exception as e:
+            logger.error(
+                {"message": "Error deleting collection", "name": collection_name, "error": str(e)},
+                exc_info=True,
+            )
+            return False
+        finally:
+            try:
+                connections.disconnect("default")
+            except Exception:
+                pass
 
 
 def create_vector_store_with_config(config_manager, uri: str = "http://milvus:19530") -> VectorStore:
-    """Factory function to create a VectorStore with ConfigManager integration.
-    
-    Args:
-        config_manager: ConfigManager instance for source management
-        uri: Milvus connection URI
-        
-    Returns:
-        VectorStore instance with source deletion callback
-    """
+    """Factory function to create a VectorStore with ConfigManager integration."""
     def handle_source_deleted(source_name: str):
-        """Handle source deletion by updating config."""
         config = config_manager.read_config()
         if hasattr(config, 'sources') and source_name in config.sources:
             config.sources.remove(source_name)
             config_manager.write_config(config)
-    
+
     return VectorStore(
         uri=uri,
         on_source_deleted=handle_source_deleted

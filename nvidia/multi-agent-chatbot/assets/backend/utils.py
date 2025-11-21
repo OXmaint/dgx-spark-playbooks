@@ -19,7 +19,7 @@
 import json
 import os
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, ToolCall
 
@@ -32,7 +32,9 @@ async def process_and_ingest_files_background(
     vector_store: VectorStore, 
     config_manager, 
     task_id: str, 
-    indexing_tasks: Dict[str, str]
+    indexing_tasks: Dict[str, str],
+    collection: Optional[str] = VectorStore.default_collection_name(),
+    doc_types: Optional[List[str]] = 'document',
 ) -> None:
     """Process and ingest files in the background.
     
@@ -88,7 +90,7 @@ async def process_and_ingest_files_background(
         logger.debug({"message": "Loading documents", "task_id": task_id})
         
         try:
-            documents = vector_store._load_documents(file_paths)
+            documents = vector_store._load_documents(file_paths, doc_types)
             
             logger.debug({
                 "message": "Documents loaded, starting indexing",
@@ -97,7 +99,7 @@ async def process_and_ingest_files_background(
             })
             
             indexing_tasks[task_id] = "indexing_documents"
-            vector_store.index_documents(documents)
+            vector_store.index_documents(documents, collection_name=collection)
             
             if file_names:
                 config = config_manager.read_config()
@@ -189,7 +191,8 @@ async def process_batch_analysis_background(
     report_format: str,
     batch_agent,
     batch_tasks: Dict[str, str],
-    organization: str = None
+    organization: str = None,
+    descriptions_map: Dict[str, str] = None
 ) -> None:
     """Background task for processing batch image analysis.
 
@@ -201,6 +204,7 @@ async def process_batch_analysis_background(
         batch_agent: BatchAnalysisAgent instance
         batch_tasks: Dictionary to track task status
         organization: Optional organization/source name for vector search filtering
+        descriptions_map: Optional mapping of {filename: description} for additional context
     """
     try:
         batch_tasks[batch_id] = "processing"
@@ -209,7 +213,8 @@ async def process_batch_analysis_background(
             image_ids=image_ids,
             analysis_prompt=analysis_prompt,
             report_format=report_format,
-            organization=organization
+            organization=organization,
+            descriptions_map=descriptions_map
         )
         batch_tasks[batch_id] = "completed"
     except Exception as e:

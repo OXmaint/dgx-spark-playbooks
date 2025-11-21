@@ -1121,3 +1121,225 @@ class PostgreSQLConversationStorage:
             )
             self._db_operations += 1
             return "DELETE 1" in result
+
+    # Cron Job Methods
+
+    async def create_cron_job(
+        self,
+        job_id: str,
+        name: str,
+        schedule: str,
+        config: Dict,
+        enabled: bool = True
+    ) -> None:
+        """Create a new cron job.
+
+        Args:
+            job_id: Unique job identifier
+            name: Job name
+            schedule: Cron schedule expression
+            config: Job configuration dictionary
+            enabled: Whether job is enabled
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cron_jobs (
+                    job_id VARCHAR(36) PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    schedule VARCHAR(100) NOT NULL,
+                    config JSONB NOT NULL,
+                    enabled BOOLEAN DEFAULT true,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                INSERT INTO cron_jobs (job_id, name, schedule, config, enabled)
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                job_id, name, schedule, json.dumps(config), enabled
+            )
+            self._db_operations += 1
+
+    async def get_cron_job(self, job_id: str) -> Optional[Dict]:
+        """Get a cron job by ID.
+
+        Args:
+            job_id: Job identifier
+
+        Returns:
+            Job dictionary or None
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM cron_jobs WHERE job_id = $1",
+                job_id
+            )
+            self._db_operations += 1
+
+            if row:
+                return {
+                    "job_id": row['job_id'],
+                    "name": row['name'],
+                    "schedule": row['schedule'],
+                    "config": json.loads(row['config']) if isinstance(row['config'], str) else row['config'],
+                    "enabled": row['enabled'],
+                    "created_at": row['created_at'].isoformat() if row['created_at'] else None,
+                    "updated_at": row['updated_at'].isoformat() if row['updated_at'] else None
+                }
+            return None
+
+    async def list_cron_jobs(self, enabled_only: bool = False) -> List[Dict]:
+        """List all cron jobs.
+
+        Args:
+            enabled_only: Only return enabled jobs
+
+        Returns:
+            List of job dictionaries
+        """
+        async with self.pool.acquire() as conn:
+            if enabled_only:
+                query = "SELECT * FROM cron_jobs WHERE enabled = true ORDER BY created_at DESC"
+            else:
+                query = "SELECT * FROM cron_jobs ORDER BY created_at DESC"
+
+            rows = await conn.fetch(query)
+            self._db_operations += 1
+
+            return [
+                {
+                    "job_id": row['job_id'],
+                    "name": row['name'],
+                    "schedule": row['schedule'],
+                    "config": json.loads(row['config']) if isinstance(row['config'], str) else row['config'],
+                    "enabled": row['enabled'],
+                    "created_at": row['created_at'].isoformat() if row['created_at'] else None,
+                    "updated_at": row['updated_at'].isoformat() if row['updated_at'] else None
+                }
+                for row in rows
+            ]
+
+    async def update_cron_job_status(self, job_id: str, enabled: bool) -> bool:
+        """Update cron job enabled status.
+
+        Args:
+            job_id: Job identifier
+            enabled: New enabled status
+
+        Returns:
+            True if updated, False otherwise
+        """
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE cron_jobs
+                SET enabled = $1, updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = $2
+                """,
+                enabled, job_id
+            )
+            self._db_operations += 1
+            return "UPDATE 1" in result
+
+    async def delete_cron_job(self, job_id: str) -> bool:
+        """Delete a cron job.
+
+        Args:
+            job_id: Job identifier
+
+        Returns:
+            True if deleted, False otherwise
+        """
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM cron_jobs WHERE job_id = $1",
+                job_id
+            )
+            self._db_operations += 1
+            return "DELETE 1" in result
+
+    async def record_cron_execution(
+        self,
+        execution_id: str,
+        job_id: str,
+        status: str,
+        output: str,
+        batch_id: Optional[str] = None
+    ) -> None:
+        """Record a cron job execution.
+
+        Args:
+            execution_id: Unique execution identifier
+            job_id: Job identifier
+            status: Execution status ('success', 'failed', 'timeout', 'error')
+            output: Execution output or error message
+            batch_id: Optional batch job ID if applicable
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cron_job_executions (
+                    execution_id VARCHAR(36) PRIMARY KEY,
+                    job_id VARCHAR(36) NOT NULL,
+                    status VARCHAR(50) NOT NULL,
+                    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    output TEXT,
+                    batch_id VARCHAR(36)
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                INSERT INTO cron_job_executions
+                (execution_id, job_id, status, output, batch_id)
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                execution_id, job_id, status, output, batch_id
+            )
+            self._db_operations += 1
+
+    async def get_cron_job_executions(
+        self,
+        job_id: str,
+        limit: int = 50
+    ) -> List[Dict]:
+        """Get execution history for a cron job.
+
+        Args:
+            job_id: Job identifier
+            limit: Maximum number of executions to return
+
+        Returns:
+            List of execution dictionaries
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT * FROM cron_job_executions
+                WHERE job_id = $1
+                ORDER BY started_at DESC
+                LIMIT $2
+                """,
+                job_id, limit
+            )
+            self._db_operations += 1
+
+            return [
+                {
+                    "execution_id": row['execution_id'],
+                    "job_id": row['job_id'],
+                    "status": row['status'],
+                    "started_at": row['started_at'].isoformat() if row['started_at'] else None,
+                    "completed_at": row['completed_at'].isoformat() if row['completed_at'] else None,
+                    "output": row['output'],
+                    "batch_id": row['batch_id']
+                }
+                for row in rows
+            ]
