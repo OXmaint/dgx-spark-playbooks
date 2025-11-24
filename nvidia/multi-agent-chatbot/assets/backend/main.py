@@ -265,7 +265,21 @@ async def ingest_files(
     collection: Optional[str] = Form(None),  # NEW
     doc_types: Optional[List[str]] = Form(None),
 ):
-    """Ingest documents for vector search and RAG (optionally to a specific collection)."""
+    """
+    Ingest documents for vector search and RAG (optionally to a specific collection).
+
+    Example curl command to send 3 files with collection=x and doc_type=y:
+
+    curl -X POST "http://localhost:8000/ingest" \
+      -F "files=@file1.pdf" \
+      -F "files=@file2.pdf" \
+      -F "files=@file3.pdf" \
+      -F "collection=x" \
+      -F "doc_types=y"
+
+    If you want to provide multiple doc_types, repeat -F:
+      -F "doc_types=y" -F "doc_types=z"
+    """
     try:
         log_request({"file_count": len(files) if files else 0, "collection": collection}, "/ingest")
         
@@ -578,6 +592,98 @@ async def clear_all_chats():
             status_code=500,
             detail=f"Error clearing all chats: {str(e)}"
         )
+
+
+@app.get("/collections")
+async def list_collections():
+    """List all collections and their document counts.
+
+    Returns:
+        List of collections with names and document counts
+    """
+    try:
+        collections = vector_store.list_collections()
+        return {
+            "collections": collections,
+            "total_collections": len(collections)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing collections: {str(e)}")
+
+
+@app.get("/collections/documents")
+async def view_documents(
+    collection_name: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+):
+    """View indexed documents in a collection with pagination.
+
+    Args:
+        collection_name: Optional collection name to view. If not provided, views default collection.
+        limit: Maximum number of documents to return (default 100, max 1000)
+        offset: Number of documents to skip for pagination (default 0)
+
+    Returns:
+        Paginated list of documents with their content and metadata
+
+    Example:
+        GET /collections/documents?collection_name=Oceanix&limit=50&offset=0
+        GET /collections/documents?collection_name=Oceanix&limit=50&offset=50
+    """
+    try:
+        # Validate limit
+        if limit > 1000:
+            raise HTTPException(status_code=400, detail="Limit cannot exceed 1000")
+        if limit < 1:
+            raise HTTPException(status_code=400, detail="Limit must be at least 1")
+        if offset < 0:
+            raise HTTPException(status_code=400, detail="Offset cannot be negative")
+
+        result = vector_store.view_documents(
+            collection_name=collection_name,
+            limit=limit,
+            offset=offset
+        )
+
+        # Check for errors in the result
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error viewing documents: {str(e)}")
+
+
+@app.post("/collections/{collection_name}/purge")
+async def purge_collection(collection_name: str):
+    """Purge all documents from a collection without deleting the collection itself.
+
+    Args:
+        collection_name: Name of the collection to purge
+
+    Returns:
+        Status and count of deleted documents
+
+    Example:
+        POST /collections/Oceanix/purge
+    """
+    try:
+        result = vector_store.purge_collection(collection_name)
+
+        if not result["success"]:
+            if "not found" in result["message"]:
+                raise HTTPException(status_code=404, detail=result["message"])
+            else:
+                raise HTTPException(status_code=500, detail=result["message"])
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error purging collection: {str(e)}")
 
 
 @app.delete("/collections/{collection_name}")

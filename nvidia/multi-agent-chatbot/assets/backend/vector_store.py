@@ -174,7 +174,7 @@ class VectorStore:
             
             logger.info(f"Processing {len(file_paths)} files: {file_paths}")
             
-            for file_path in file_paths:
+            for i, file_path in enumerate(file_paths):
                 try:
                     if not source_name:
                         source_name = os.path.basename(file_path)
@@ -238,7 +238,7 @@ class VectorStore:
                                 }
                             )]
                     
-                    for i, doc in enumerate(docs):
+                    for doc in docs:
                         if not doc.metadata:
                             doc.metadata = {}
                         
@@ -280,6 +280,83 @@ class VectorStore:
             }, exc_info=True)
             raise
     
+    def _get_required_schema_fields(self, collection_name: str) -> dict:
+        """Get required fields from collection schema and their default values.
+
+        Args:
+            collection_name: Name of the collection
+
+        Returns:
+            Dictionary mapping field names to their default values
+        """
+        try:
+            from pymilvus import utility, DataType
+
+            connections.connect(uri=self.uri)
+
+            # Check if collection exists
+            if not utility.has_collection(collection_name):
+                # Collection doesn't exist yet, return empty dict
+                return {}
+
+            collection = Collection(name=collection_name)
+            required_fields = {}
+
+            # Iterate through schema fields
+            for field in collection.schema.fields:
+                # Skip primary key, vector fields, and fields that are auto-generated
+                if field.is_primary or field.dtype == DataType.FLOAT_VECTOR:
+                    continue
+
+                # Check if field is required (not nullable and no default value)
+                # For LangChain Milvus, common metadata fields that might be required
+                field_name = field.name
+
+                # Add common fields that UnstructuredLoader provides for PDFs
+                # but might be missing for other file types like CSV
+                if field_name == "page_number":
+                    required_fields[field_name] = "0"
+                elif field_name == "coordinates":
+                    required_fields[field_name] = ""
+                elif field_name in ["text", "source", "file_path", "filename", "type"]:
+                    # These are handled elsewhere, skip
+                    continue
+                else:
+                    # For any other field, try to infer a default based on type
+                    if field.dtype in [DataType.INT8, DataType.INT16, DataType.INT32, DataType.INT64]:
+                        required_fields[field_name] = 0
+                    elif field.dtype in [DataType.FLOAT, DataType.DOUBLE]:
+                        required_fields[field_name] = 0.0
+                    elif field.dtype in [DataType.VARCHAR, DataType.STRING]:
+                        required_fields[field_name] = ""
+                    elif field.dtype == DataType.BOOL:
+                        required_fields[field_name] = False
+
+            logger.debug({
+                "message": "Identified required schema fields",
+                "collection": collection_name,
+                "required_fields": required_fields
+            })
+
+            return required_fields
+
+        except Exception as e:
+            logger.warning({
+                "message": "Error getting schema fields, using default required fields",
+                "collection": collection_name,
+                "error": str(e)
+            })
+            # Return common required fields as fallback
+            return {
+                "page_number": "0",
+                "coordinates": ""
+            }
+        finally:
+            try:
+                connections.disconnect("default")
+            except Exception:
+                pass
+
     def index_documents(
         self,
         documents: List[Document],
@@ -295,15 +372,23 @@ class VectorStore:
                 {"message": "Starting document indexing", "document_count": len(documents), "collection": target}
             )
 
+            # Get required fields for this collection
+            required_fields = self._get_required_schema_fields(target)
+
             # chunking control
             splits = documents if no_split else self.text_splitter.split_documents(documents)
 
-            # annotate chunk indices
+            # annotate chunk indices and add required fields
             chunk_total = len(splits)
             for i, d in enumerate(splits):
                 d.metadata = d.metadata or {}
                 d.metadata["chunk_index"] = i
                 d.metadata["chunk_total"] = chunk_total
+
+                # Add any missing required fields with their default values
+                for field_name, default_value in required_fields.items():
+                    if field_name not in d.metadata:
+                        d.metadata[field_name] = default_value
 
             # collect logical ids for upsert
             ids = {d.metadata.get("id") for d in splits if d.metadata.get("id")}
@@ -354,54 +439,100 @@ class VectorStore:
     # ---------------------------------------------------------------------- #
     def view_documents(
         self,
-        collection_name: Optional[str] = None
-    ) -> List[Dict]:
+        collection_name: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0
+    ) -> Dict[str, any]:
         """
-        View all documents and their metadata from the specified collection.
+        View documents and their metadata from the specified collection with pagination.
         If collection_name is not provided, uses the default collection.
 
+        Args:
+            collection_name: Optional collection name
+            limit: Maximum number of documents to return (default 100)
+            offset: Number of documents to skip (default 0)
+
         Returns:
-            List of dicts with 'content', 'metadata', and 'collection' keys.
+            Dict with 'documents', 'total_count', 'limit', 'offset', and 'collection' keys.
         """
         try:
             target = self.default_collection_name() if not collection_name else self._sanitize_collection(collection_name)
-            store = self._get_store_for(target)
-            # Attempt to access internal docs; fallback to _docs attribute or empty.
-            if hasattr(store, "docs"):
-                docs = store.docs
-            elif hasattr(store, "_docs"):
-                docs = store._docs
-            else:
-                # If the document retrieval interface is different, try as_data_frame for Milvus.
-                try:
-                    docs = []
-                    milvus_collection = Collection(name=target)
-                    milvus_collection.load()
-                    df = milvus_collection.query(expr=None, output_fields=["content", "metadata"])
-                    for row in df:
-                        docs.append(Document(page_content=row.get("content", ""), metadata=row.get("metadata", {})))
-                except Exception:
-                    docs = []
-            result = []
-            for doc in docs:
-                result.append({
-                    "content": getattr(doc, 'page_content', getattr(doc, 'content', "")),
-                    "metadata": getattr(doc, 'metadata', {}),
+
+            # Connect and query Milvus directly for proper pagination support
+            connections.connect(uri=self.uri)
+            milvus_collection = Collection(name=target)
+            milvus_collection.load()
+
+            # Get total count
+            total_count = milvus_collection.num_entities
+
+            # Query with pagination - Milvus query uses expr="" for all docs
+            results = milvus_collection.query(
+                expr="",
+                output_fields=["text", "source", "file_path", "filename", "type", "chunk_index", "chunk_total"],
+                limit=limit,
+                offset=offset
+            )
+
+            documents = []
+            for row in results:
+                # Extract content (Milvus stores it as 'text' field)
+                content = row.get("text", "")
+
+                # Build metadata from other fields
+                metadata = {
+                    "source": row.get("source", ""),
+                    "file_path": row.get("file_path", ""),
+                    "filename": row.get("filename", ""),
+                    "type": row.get("type", ""),
+                    "chunk_index": row.get("chunk_index", 0),
+                    "chunk_total": row.get("chunk_total", 0),
+                }
+
+                documents.append({
+                    "content": content,
+                    "metadata": metadata,
                     "collection": target,
                 })
+
             logger.debug({
-                "message": "Viewed documents",
+                "message": "Viewed documents with pagination",
                 "collection": target,
-                "document_count": len(result)
+                "document_count": len(documents),
+                "total_count": total_count,
+                "limit": limit,
+                "offset": offset
             })
-            return result
+
+            return {
+                "documents": documents,
+                "total_count": total_count,
+                "limit": limit,
+                "offset": offset,
+                "collection": target,
+                "has_more": (offset + len(documents)) < total_count
+            }
+
         except Exception as e:
             logger.error({
                 "message": "Error viewing documents",
                 "error": str(e),
                 "collection": collection_name
             }, exc_info=True)
-            return []
+            return {
+                "documents": [],
+                "total_count": 0,
+                "limit": limit,
+                "offset": offset,
+                "collection": collection_name or self.default_collection_name(),
+                "has_more": False,
+                "error": str(e)
+            }
+        finally:
+            try:
+                connections.disconnect("default")
+            except Exception:
+                pass
     
     
     def get_documents(
@@ -442,8 +573,199 @@ class VectorStore:
             return []
 
     # ---------------------------------------------------------------------- #
-    #   Delete collection
+    #   List collections
     # ---------------------------------------------------------------------- #
+    def list_collections(self) -> List[Dict[str, any]]:
+        """List all collections and their document counts.
+
+        Returns:
+            List of dicts with 'name' and 'count' keys for each collection
+        """
+        try:
+            from pymilvus import utility
+
+            connections.connect(uri=self.uri)
+            collection_names = utility.list_collections()
+
+            collections_info = []
+            for name in collection_names:
+                try:
+                    col = Collection(name=name)
+                    col.load()
+                    count = col.num_entities
+                    collections_info.append({
+                        "name": name,
+                        "document_count": count
+                    })
+                except Exception as e:
+                    logger.warning(f"Error getting count for collection {name}: {e}")
+                    collections_info.append({
+                        "name": name,
+                        "document_count": 0,
+                        "error": str(e)
+                    })
+
+            logger.debug({
+                "message": "Listed collections",
+                "collection_count": len(collections_info)
+            })
+            return collections_info
+
+        except Exception as e:
+            logger.error({
+                "message": "Error listing collections",
+                "error": str(e)
+            }, exc_info=True)
+            return []
+        finally:
+            try:
+                connections.disconnect("default")
+            except Exception:
+                pass
+
+    # ---------------------------------------------------------------------- #
+    #   Delete / Purge collection
+    # ---------------------------------------------------------------------- #
+    def purge_collection(self, collection_name: str) -> Dict[str, any]:
+        """Delete all documents from a collection without dropping the collection.
+
+        Args:
+            collection_name: Name of the collection to purge
+
+        Returns:
+            Dict with status and count of deleted documents
+        """
+        try:
+            from pymilvus import utility
+
+            target = self._sanitize_collection(collection_name)
+            connections.connect(uri=self.uri)
+
+            if not utility.has_collection(target):
+                logger.warning({"message": "Collection not found", "name": target})
+                return {
+                    "success": False,
+                    "message": f"Collection '{target}' not found",
+                    "deleted_count": 0
+                }
+
+            collection = Collection(name=target)
+            collection.load()
+
+            # Get count before deletion
+            count_before = collection.num_entities
+
+            if count_before == 0:
+                logger.info({"message": "Collection already empty", "name": target})
+                return {
+                    "success": True,
+                    "message": f"Collection '{target}' is already empty",
+                    "deleted_count": 0,
+                    "remaining_count": 0
+                }
+
+            # Get the primary key field name from schema
+            primary_field = None
+            for field in collection.schema.fields:
+                if field.is_primary:
+                    primary_field = field.name
+                    break
+
+            if not primary_field:
+                raise ValueError(f"No primary key field found in collection '{target}'")
+
+            logger.debug({
+                "message": "Found primary key field",
+                "collection": target,
+                "primary_field": primary_field
+            })
+
+            # Query all primary keys in batches and delete
+            batch_size = 1000
+            total_deleted = 0
+            offset = 0
+
+            while True:
+                # Query a batch of primary keys
+                results = collection.query(
+                    expr="",
+                    output_fields=[primary_field],
+                    limit=batch_size,
+                    offset=offset
+                )
+
+                if not results:
+                    break
+
+                # Extract IDs
+                ids = [str(row[primary_field]) for row in results]
+
+                if not ids:
+                    break
+
+                # Build delete expression for this batch
+                # Use IN operator for batch deletion
+                ids_str = ", ".join([f'"{id}"' if isinstance(row[primary_field], str) else str(id) for row, id in zip(results, ids)])
+                delete_expr = f'{primary_field} in [{ids_str}]'
+
+                # Delete this batch
+                collection.delete(expr=delete_expr)
+                total_deleted += len(ids)
+
+                logger.debug({
+                    "message": "Deleted batch",
+                    "collection": target,
+                    "batch_size": len(ids),
+                    "total_deleted": total_deleted
+                })
+
+                # If we got fewer results than batch_size, we're done
+                if len(results) < batch_size:
+                    break
+
+            # Flush to ensure deletion is persisted
+            collection.flush()
+
+            # Get count after deletion to verify
+            collection.load()
+            count_after = collection.num_entities
+
+            logger.info({
+                "message": "Collection purged",
+                "name": target,
+                "count_before": count_before,
+                "deleted_count": total_deleted,
+                "remaining_count": count_after
+            })
+
+            # Remove from store cache to force reload
+            if target in self._stores:
+                del self._stores[target]
+
+            return {
+                "success": True,
+                "message": f"Purged {total_deleted} documents from collection '{target}'",
+                "deleted_count": total_deleted,
+                "remaining_count": count_after
+            }
+
+        except Exception as e:
+            logger.error({
+                "message": "Error purging collection",
+                "name": collection_name,
+                "error": str(e)
+            }, exc_info=True)
+            return {
+                "success": False,
+                "message": f"Error purging collection: {str(e)}",
+                "deleted_count": 0
+            }
+        finally:
+            try:
+                connections.disconnect("default")
+            except Exception:
+                pass
+
     def delete_collection(self, collection_name: str) -> bool:
         """Delete a collection from Milvus."""
         try:

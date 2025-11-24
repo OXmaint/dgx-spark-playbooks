@@ -33,7 +33,7 @@ async def process_and_ingest_files_background(
     config_manager, 
     task_id: str, 
     indexing_tasks: Dict[str, str],
-    collection: Optional[str] = VectorStore.default_collection_name(),
+    collection: Optional[str] = 'context',
     doc_types: Optional[List[str]] = 'document',
 ) -> None:
     """Process and ingest files in the background.
@@ -90,9 +90,9 @@ async def process_and_ingest_files_background(
         logger.debug({"message": "Loading documents", "task_id": task_id})
         
         try:
-            documents = vector_store._load_documents(file_paths, doc_types)
+            documents = vector_store._load_documents(file_paths=file_paths, doc_types=doc_types)
             
-            logger.debug({
+            logger.info({
                 "message": "Documents loaded, starting indexing",
                 "task_id": task_id,
                 "document_count": len(documents)
@@ -119,7 +119,7 @@ async def process_and_ingest_files_background(
                     })
             
             indexing_tasks[task_id] = "completed"
-            logger.debug({
+            logger.info({
                 "message": "Background processing and indexing completed successfully",
                 "task_id": task_id
             })
