@@ -1,0 +1,110 @@
+{
+  "name": "Breakdown Prediction API",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "breakdown-prediction",
+        "options": {
+          "responseMode": "lastNode"
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "breakdown-prediction-webhook"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://backend:8000/breakdown-prediction/direct",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"asset_info\": {{ JSON.stringify($json.body.asset_info) }},\n  \"sensor_data\": {{ $json.body.sensor_data ? JSON.stringify($json.body.sensor_data) : 'null' }},\n  \"work_orders\": {{ $json.body.work_orders ? JSON.stringify($json.body.work_orders) : 'null' }},\n  \"inspections\": {{ $json.body.inspections ? JSON.stringify($json.body.inspections) : 'null' }},\n  \"service_schedules\": {{ $json.body.service_schedules ? JSON.stringify($json.body.service_schedules) : 'null' }},\n  \"maintenance_requests\": {{ $json.body.maintenance_requests ? JSON.stringify($json.body.maintenance_requests) : 'null' }},\n  \"knowledge_base\": {{ $json.body.knowledge_base ? JSON.stringify($json.body.knowledge_base) : 'null' }},\n  \"collection_name\": {{ $json.body.collection_name ? JSON.stringify($json.body.collection_name) : 'null' }}\n}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "id": "http-request",
+      "name": "Call Breakdown Prediction API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst pred = data.prediction || {};\nconst summary = pred.prediction_summary || {};\nconst predictions = pred.breakdown_predictions || [];\nconst factors = pred.contributing_factors || [];\nconst recommendations = pred.prevention_recommendations || [];\nconst thought = pred.thought_process || {};\n\nfunction getRiskColor(level) {\n  const c = { 'CRITICAL': '#dc2626', 'HIGH': '#ea580c', 'MEDIUM': '#ca8a04', 'LOW': '#16a34a', 'MINIMAL': '#22c55e' };\n  return c[level?.toUpperCase()] || '#6b7280';\n}\n\nfunction badge(level) {\n  return `<span style=\"background:${getRiskColor(level)};color:#fff;padding:4px 12px;border-radius:4px;font-weight:bold;font-size:12px\">${level||'N/A'}</span>`;\n}\n\nconst html = `<!DOCTYPE html>\n<html><head><meta charset=\"UTF-8\"><title>Breakdown Prediction - ${data.asset_name||'Asset'}</title>\n<style>\n*{margin:0;padding:0;box-sizing:border-box}\nbody{font-family:'Segoe UI',sans-serif;background:#f3f4f6;color:#1f2937;line-height:1.6}\n.container{max-width:1100px;margin:0 auto;padding:20px}\n.header{background:linear-gradient(135deg,#1e3a8a,#3b82f6);color:#fff;padding:30px;border-radius:12px;margin-bottom:24px}\n.header h1{font-size:26px;margin-bottom:6px}\n.header .sub{opacity:.9;font-size:14px}\n.header .meta{display:flex;gap:24px;margin-top:16px;flex-wrap:wrap;font-size:13px}\n.header .meta strong{display:block;font-size:11px;opacity:.8;text-transform:uppercase}\n.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px}\n.card{background:#fff;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.1)}\n.card .label{font-size:12px;color:#6b7280;text-transform:uppercase;font-weight:600}\n.card .value{font-size:32px;font-weight:bold;margin-top:4px}\n.card .sub{font-size:12px;color:#9ca3af;margin-top:4px}\n.section{background:#fff;border-radius:12px;padding:24px;margin-bottom:24px;box-shadow:0 1px 3px rgba(0,0,0,.1)}\n.section h2{font-size:18px;color:#1e3a8a;margin-bottom:16px;padding-bottom:8px;border-bottom:2px solid #e5e7eb}\n.pred-card{border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin-bottom:12px}\n.pred-card .title{font-weight:600;font-size:15px;margin-bottom:8px}\n.pred-card .details{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;font-size:13px}\n.pred-card .dlabel{color:#6b7280;font-size:11px;text-transform:uppercase}\n.factor-item{display:flex;gap:12px;padding:12px 0;border-bottom:1px solid #f3f4f6}\n.factor-item:last-child{border-bottom:none}\n.factor-icon{width:40px;height:40px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}\n.factor-content{flex:1}\n.factor-title{font-weight:600;font-size:14px}\n.factor-meta{font-size:12px;color:#6b7280;margin-top:2px}\n.factor-evidence{font-size:12px;color:#9ca3af;margin-top:4px;font-style:italic}\n.rec-item{display:flex;gap:16px;padding:16px 0;border-bottom:1px solid #f3f4f6}\n.rec-item:last-child{border-bottom:none}\n.rec-pri{width:36px;height:36px;border-radius:50%;background:#1e3a8a;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:14px;flex-shrink:0}\n.rec-content{flex:1}\n.rec-action{font-weight:600;font-size:14px;margin-bottom:4px}\n.rec-meta{display:flex;gap:16px;font-size:12px;color:#6b7280}\n.thought{background:#f8fafc;border-radius:8px;padding:16px;margin-top:16px;font-size:14px;color:#475569}\n.ds-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}\n.ds-item{display:flex;align-items:center;gap:8px;padding:8px;border-radius:6px;font-size:13px}\n.footer{text-align:center;padding:24px;color:#9ca3af;font-size:12px}\n.progress{height:8px;background:#e5e7eb;border-radius:4px;overflow:hidden;margin-top:8px}\n.progress-fill{height:100%;border-radius:4px}\n@media print{body{background:#fff}.section{box-shadow:none;border:1px solid #e5e7eb;page-break-inside:avoid}}\n</style></head>\n<body><div class=\"container\">\n<div class=\"header\">\n<h1>Breakdown Prediction Report</h1>\n<p class=\"sub\">${data.asset_name||'Unknown Asset'}</p>\n<div class=\"meta\">\n<div><strong>Asset ID</strong>${data.asset_id||'N/A'}</div>\n<div><strong>Prediction ID</strong>${data.prediction_id||'N/A'}</div>\n<div><strong>Generated</strong>${data.generated_at?new Date(data.generated_at).toLocaleString():'N/A'}</div>\n<div><strong>Confidence</strong>${summary.confidence_level||'N/A'}</div>\n</div></div>\n\n<div class=\"cards\">\n<div class=\"card\"><div class=\"label\">Overall Risk Level</div><div class=\"value\" style=\"color:${getRiskColor(summary.overall_risk_level)}\">${summary.overall_risk_level||'N/A'}</div><div class=\"sub\">Based on all available data</div></div>\n<div class=\"card\"><div class=\"label\">30-Day Breakdown Probability</div><div class=\"value\" style=\"color:${(summary.breakdown_probability_30_days||0)>50?'#dc2626':(summary.breakdown_probability_30_days||0)>30?'#ea580c':'#16a34a'}\">${summary.breakdown_probability_30_days||0}%</div><div class=\"progress\"><div class=\"progress-fill\" style=\"width:${summary.breakdown_probability_30_days||0}%;background:${(summary.breakdown_probability_30_days||0)>50?'#dc2626':(summary.breakdown_probability_30_days||0)>30?'#ea580c':'#16a34a'}\"></div></div></div>\n<div class=\"card\"><div class=\"label\">Action Urgency</div><div class=\"value\" style=\"font-size:24px;color:${summary.recommended_action_urgency==='IMMEDIATE'?'#dc2626':'#ca8a04'}\">${summary.recommended_action_urgency||'N/A'}</div><div class=\"sub\">Recommended response time</div></div>\n</div>\n\n<div class=\"section\"><h2>🎯 Predicted Failure Modes</h2>\n${predictions.length?predictions.map(p=>`<div class=\"pred-card\"><div class=\"title\">${p.failure_mode||'Unknown'}</div><div class=\"details\"><div><div class=\"dlabel\">Probability</div><strong>${p.probability||0}%</strong></div><div><div class=\"dlabel\">Timeframe</div><strong>${p.estimated_timeframe||'N/A'} days</strong></div><div><div class=\"dlabel\">Risk Score</div><strong>${p.risk_score||0}/100</strong></div><div><div class=\"dlabel\">Risk Level</div>${badge(p.risk_level)}</div></div></div>`).join(''):'<p style=\"color:#6b7280\">No failure predictions available.</p>'}\n</div>\n\n<div class=\"section\"><h2>⚠️ Contributing Factors</h2>\n${factors.length?factors.map(f=>{const icons={'MAINTENANCE':'🔧','SENSOR':'📡','OPERATIONAL':'⚙️','ENVIRONMENTAL':'🌡️','AGE':'📅'};const icon=icons[f.category?.toUpperCase()]||'📋';const bg={'HIGH':'#fef2f2','MEDIUM':'#fefce8','LOW':'#f0fdf4'}[f.severity?.toUpperCase()]||'#f3f4f6';return`<div class=\"factor-item\"><div class=\"factor-icon\" style=\"background:${bg}\">${icon}</div><div class=\"factor-content\"><div class=\"factor-title\">${f.factor||'Unknown'}</div><div class=\"factor-meta\"><span style=\"background:${bg};padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600\">${f.severity||'N/A'}</span> · ${f.category||'N/A'} · Trend: ${f.trend||'N/A'}</div>${f.evidence?`<div class=\"factor-evidence\">Evidence: ${f.evidence}</div>`:''}</div></div>`;}).join(''):'<p style=\"color:#6b7280\">No contributing factors identified.</p>'}\n</div>\n\n<div class=\"section\"><h2>✅ Prevention Recommendations</h2>\n${recommendations.length?recommendations.map(r=>`<div class=\"rec-item\"><div class=\"rec-pri\">${r.priority||'-'}</div><div class=\"rec-content\"><div class=\"rec-action\">${r.action||'No action'}</div><div class=\"rec-meta\"><span>📁 ${r.category||'General'}</span><span>⏰ ${r.deadline||'No deadline'}</span></div></div></div>`).join(''):'<p style=\"color:#6b7280\">No recommendations available.</p>'}\n</div>\n\n${thought.summary?`<div class=\"section\"><h2>🧠 Analysis Summary</h2><div class=\"thought\">${thought.summary}</div></div>`:''}\n\n<div class=\"section\"><h2>📊 Data Sources</h2><div class=\"ds-grid\">\n${Object.entries(data.data_sources||{}).map(([k,v])=>`<div class=\"ds-item\" style=\"background:${v?'#f0fdf4':'#fef2f2'}\"><span>${v?'✅':'❌'}</span><span>${k.replace(/_/g,' ').replace(/\\b\\w/g,l=>l.toUpperCase())}</span></div>`).join('')}\n</div></div>\n\n<div class=\"footer\"><p>Generated by OxMaint AI Vision • Breakdown Prediction System</p><p>Report ID: ${data.prediction_id||'N/A'} • ${new Date().toISOString()}</p></div>\n</div></body></html>`;\n\nreturn {\n  json: {\n    ...data,\n    html_report: html,\n    report_filename: `breakdown_prediction_${data.asset_id||'unknown'}_${new Date().toISOString().split('T')[0]}.html`\n  }\n};"
+      },
+      "id": "generate-html-report",
+      "name": "Generate HTML Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [750, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { prediction_id: $json.prediction_id, asset_id: $json.asset_id, asset_name: $json.asset_name, generated_at: $json.generated_at, prediction: $json.prediction, data_sources: $json.data_sources, html_report: $json.html_report, report_filename: $json.report_filename } }}",
+        "options": {}
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1000, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Call Breakdown Prediction API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Breakdown Prediction API": {
+      "main": [
+        [
+          {
+            "node": "Generate HTML Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate HTML Report": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "pinData": {}
+}

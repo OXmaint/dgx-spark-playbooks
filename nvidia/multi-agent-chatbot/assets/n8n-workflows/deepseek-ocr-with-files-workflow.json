@@ -1,0 +1,111 @@
+{
+  "name": "DeepSeek OCR with Annotations",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ocr-with-files",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - Receive File",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "ocr-files-webhook"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://deepseek-ocr:8000/ocr",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            },
+            {
+              "parameterType": "formData",
+              "name": "output_file",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          },
+          "timeout": 300000
+        }
+      },
+      "id": "http-request-ocr",
+      "name": "Call DeepSeek OCR",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "binary",
+        "responseBinaryPropertyName": "data",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/zip"
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "attachment; filename=ocr_output.zip"
+              }
+            ]
+          }
+        }
+      },
+      "id": "respond-webhook",
+      "name": "Return ZIP File",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [750, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Receive File": {
+      "main": [
+        [
+          {
+            "node": "Call DeepSeek OCR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call DeepSeek OCR": {
+      "main": [
+        [
+          {
+            "node": "Return ZIP File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "pinData": {}
+}

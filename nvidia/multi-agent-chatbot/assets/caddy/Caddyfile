@@ -1,0 +1,44 @@
+# Caddyfile - Reverse proxy with TLS for local services
+# Uses self-signed internal certificates for localhost
+# Copy this to /etc/caddy/Caddyfile after installing Caddy on host
+
+{
+    # Enable local/internal TLS certificates
+    local_certs
+}
+
+# n8n - https://localhost (port 443)
+localhost {
+    tls internal
+
+    reverse_proxy localhost:5678
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        X-XSS-Protection "1; mode=block"
+        Permissions-Policy "interest-cohort=()"
+    }
+}
+
+# Backend API - https://localhost:8443
+localhost:8443 {
+    tls internal
+
+    reverse_proxy localhost:8000
+}
+
+# Frontend - https://localhost:3443
+localhost:3443 {
+    tls internal
+
+    reverse_proxy localhost:3000
+}
+
+# DeepSeek OCR - https://localhost:8543
+localhost:8543 {
+    tls internal
+
+    reverse_proxy localhost:8100
+}

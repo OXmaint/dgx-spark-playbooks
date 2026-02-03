@@ -22,17 +22,16 @@ interface WelcomeSectionProps {
 
 export default function WelcomeSection({ setQuery }: WelcomeSectionProps) {
   const promptTemplates = {
-    rag: "What is the Blackwell GB202 GPU according the whitepaper document i uploaded?",
-    image: "Can you analyze the graphs in this image and tell me any surprising stats? https://menlovc.com/wp-content/uploads/2025/06/5-parents_power_users-062425.png",
-    code: `Can you generate code to develop a responsive personal website for my freelance AI dev business based on my personal brand palette?
+    rag: "What maintenance procedures are recommended for industrial equipment according to the uploaded documentation?",
+    image: "Can you analyze this equipment image and identify any potential maintenance issues or anomalies?",
+    code: `Can you generate code to develop a responsive dashboard for monitoring equipment health metrics?
 
-My palette is:
-#606C38
-#283618
-#FEFAE0
-#DDA15E
-#BC6C25`,
-    chat: "Hey Spark! Can you draft an email asking a product manager in distributed systems to a coffee chat?"
+Use the Oxmaint brand palette:
+#1a1a6c (Navy Blue - Primary)
+#f5a623 (Golden Yellow - Secondary)
+#ffffff (White)
+#f3f4f6 (Light Gray)`,
+    chat: "Hey Synapse! Can you help me create a preventive maintenance schedule for our manufacturing equipment?"
   };
 
   const handleCardClick = (promptKey: keyof typeof promptTemplates) => {
@@ -42,7 +41,7 @@ My palette is:
   return (
     <div className={styles.welcomeContainer}>
       <div className={styles.welcomeMessage}>
-        Hello! Send a message to start chatting with Spark.
+        Hello! Send a message to start chatting with Oxmaint Synapse.
       </div>
       <div className={styles.agentCards}>
         <div 

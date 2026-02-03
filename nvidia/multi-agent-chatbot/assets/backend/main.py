@@ -33,13 +33,20 @@ from typing import List, Optional, Dict
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from agent import ChatAgent
 from batch_agent import BatchAnalysisAgent
+from breakdown_prediction_agent import BreakdownPredictionAgent
 from config import ConfigManager
 from cron_manager import CronJobManager
 from logger import logger, log_request, log_response, log_error
-from models import ChatIdRequest, ChatRenameRequest, SelectedModelRequest, ImageDescriptionRequest, BatchAnalysisRequest, CronJobRequest, CronJobUpdateRequest
+from models import (
+    ChatIdRequest, ChatRenameRequest, SelectedModelRequest, ImageDescriptionRequest,
+    BatchAnalysisRequest, CronJobRequest, CronJobUpdateRequest,
+    BreakdownPredictionRequest, BatchBreakdownPredictionRequest,
+    BreakdownPredictionDirectRequest
+)
 from postgres_storage import PostgreSQLConversationStorage
 from report_generator import ReportGenerator
 from utils import process_and_ingest_files_background, process_batch_analysis_background
@@ -67,16 +74,18 @@ vector_store._initialize_store()
 
 agent: ChatAgent | None = None
 batch_agent: BatchAnalysisAgent | None = None
+breakdown_agent: BreakdownPredictionAgent | None = None
 report_generator: ReportGenerator | None = None
 cron_manager: CronJobManager | None = None
 indexing_tasks: Dict[str, str] = {}
 batch_tasks: Dict[str, str] = {}
+prediction_tasks: Dict[str, str] = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown tasks."""
-    global agent, batch_agent, report_generator, cron_manager
+    global agent, batch_agent, breakdown_agent, report_generator, cron_manager
     logger.debug("Initializing PostgreSQL storage and agent...")
 
     try:
@@ -110,6 +119,16 @@ async def lifespan(app: FastAPI):
         await cron_manager.restore_jobs_from_database()
         logger.info("CronJobManager initialized successfully.")
 
+        # Initialize breakdown prediction agent
+        logger.debug("Initializing BreakdownPredictionAgent...")
+        breakdown_agent = BreakdownPredictionAgent(
+            vector_store=vector_store,
+            config_manager=config_manager,
+            postgres_storage=postgres_storage
+        )
+        await breakdown_agent.init()
+        logger.info("BreakdownPredictionAgent initialized successfully.")
+
     except Exception as e:
         logger.error(f"Failed to initialize PostgreSQL storage: {e}")
         raise
@@ -139,6 +158,81 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class QueryRequest(BaseModel):
+    """Request body for synchronous chat queries."""
+
+    message: str
+    chat_id: Optional[str] = None
+
+
+@app.post("/query")
+async def query_endpoint(request: QueryRequest):
+    """Simplified HTTP endpoint for chatting with the agent.
+
+    - If `chat_id` is provided, the agent will use that conversation's history.
+    - If `chat_id` is omitted, a new one is generated and the interaction is treated as single-turn.
+
+    Example (single-turn):
+        curl -X POST "http://localhost:8000/query" \\
+          -H "Content-Type: application/json" \\
+          -d '{"message": "Hello, who are you?"}'
+
+    Example (with history):
+        curl -X POST "http://localhost:8000/query" \\
+          -H "Content-Type: application/json" \\
+          -d '{"message": "And what can you do?", "chat_id": "<existing_chat_id>"}'
+    """
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Chat agent not initialized")
+
+    chat_id = request.chat_id or str(uuid.uuid4())
+
+    final_chunks: List[str] = []
+    final_image: Optional[str] = None
+
+    try:
+        async for event in agent.query(query_text=request.message, chat_id=chat_id):
+            # Plain text events
+            if isinstance(event, str):
+                final_chunks.append(event)
+                continue
+
+            # Structured token events
+            if isinstance(event, dict):
+                event_type = event.get("type")
+                data = event.get("data")
+
+                # Final response with optional image (from annotated_image flow)
+                if (
+                    event_type == "token"
+                    and isinstance(data, dict)
+                    and data.get("type") == "final_response"
+                ):
+                    text = data.get("text") or ""
+                    if text:
+                        final_chunks.append(text)
+                    image = data.get("image")
+                    if image:
+                        final_image = image
+                # Generic token stream where data is a text fragment
+                elif event_type == "token" and isinstance(data, str):
+                    final_chunks.append(data)
+    except Exception as e:
+        logger.error(f"Error in /query endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
+
+    answer = "".join(final_chunks).strip()
+
+    if not answer and not final_image:
+        raise HTTPException(status_code=500, detail="Agent did not return a response")
+
+    return {
+        "chat_id": chat_id,
+        "answer": answer,
+        "image": final_image,
+    }
 
 
 @app.websocket("/ws/chat/{chat_id}")
@@ -1311,6 +1405,565 @@ async def get_cron_job_executions(job_id: str, limit: int = 50):
         return {"job_id": job_id, "executions": executions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting job executions: {str(e)}")
+
+
+# Breakdown Prediction Endpoints
+
+@app.post("/breakdown-prediction")
+async def create_breakdown_prediction(request: BreakdownPredictionRequest):
+    """Generate breakdown prediction for a single asset.
+
+    This endpoint analyzes asset data to predict potential unplanned breakdowns
+    within the next 30 days. It combines:
+    - Asset information (metadata, specifications)
+    - Historical work orders from vector DB
+    - Past inspections from vector DB
+    - Service schedules from vector DB
+    - Live sensor data
+
+    Args:
+        request: Breakdown prediction request with asset info and sensor data
+
+    Returns:
+        Complete breakdown prediction with risk scores, contributing factors,
+        downtime/cost estimates, and prevention recommendations
+
+    Example (cURL):
+        curl -X POST "http://localhost:8000/breakdown-prediction" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "asset_info": {
+                "asset_id": "PUMP-001",
+                "asset_name" : "Main Cooling Pump",
+                "asset_type": "Centrifugal Pump",
+                "criticality": "critical",
+                "operating_hours": 45000
+            },
+            "sensor_data":
+                {"name": "Vibration", "value": 12.5, "unit": "mm/s", "status": "warning"},
+                {"name": "Temperature", "value": 85, "unit": "C", "status": "normal"}
+            ],
+            "collection_name": "maintenance_docs"
+        }'
+    """
+    if breakdown_agent is None:
+        raise HTTPException(status_code=503, detail="Breakdown prediction agent not initialized")
+
+    try:
+        prediction_id = str(uuid.uuid4())
+
+        # Convert Pydantic models to dicts
+        asset_info_dict = request.asset_info.model_dump()
+        sensor_data_list = [s.model_dump() for s in request.sensor_data]
+
+        logger.info(f"Starting breakdown prediction {prediction_id} for asset {request.asset_info.asset_id}")
+
+        result = await breakdown_agent.predict_breakdown(
+            prediction_id=prediction_id,
+            asset_info=asset_info_dict,
+            sensor_data=sensor_data_list,
+            collection_name=request.collection_name
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in breakdown prediction: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error generating prediction: {str(e)}")
+
+
+def _format_work_orders_from_json(work_orders: list) -> str:
+    """Format work orders JSON array into text for LLM consumption."""
+    if not work_orders:
+        return "No historical work orders found."
+
+    formatted = []
+    for i, wo in enumerate(work_orders, 1):
+        wo_text = f"[Work Order {i}]:\n"
+        wo_text += f"  Work Order ID: {wo.get('work_order_id', 'N/A')}\n"
+        wo_text += f"  Work Order Number: {wo.get('work_order_number', 'N/A')}\n"
+        wo_text += f"  Title: {wo.get('title', 'N/A')}\n"
+        wo_text += f"  Description: {wo.get('description', 'N/A')}\n"
+        wo_text += f"  Type: {wo.get('work_order_type_id', 'N/A')}\n"
+        wo_text += f"  Priority: {wo.get('priority', 'N/A')}\n"
+        wo_text += f"  Status: {wo.get('status', 'N/A')}\n"
+        wo_text += f"  Requested Date: {wo.get('requested_date', 'N/A')}\n"
+        wo_text += f"  Scheduled Start: {wo.get('scheduled_start_date', 'N/A')}\n"
+        wo_text += f"  Scheduled End: {wo.get('scheduled_end_date', 'N/A')}\n"
+        wo_text += f"  Actual Start: {wo.get('actual_start_date', 'N/A')}\n"
+        wo_text += f"  Actual End: {wo.get('actual_end_date', 'N/A')}\n"
+        wo_text += f"  Requested By: {wo.get('requested_by', 'N/A')}\n"
+        wo_text += f"  Assigned To: {wo.get('assigned_to', 'N/A')}\n"
+        wo_text += f"  Source: {wo.get('source', 'N/A')} ({wo.get('source_type', 'N/A')})\n"
+        wo_text += f"  Problem Description: {wo.get('problem_description', 'N/A')}\n"
+        wo_text += f"  Root Cause: {wo.get('root_cause', 'N/A')}\n"
+        wo_text += f"  Solution: {wo.get('solution', 'N/A')}\n"
+        wo_text += f"  Preventive Actions: {wo.get('preventive_actions', 'N/A')}\n"
+        wo_text += f"  Safety Requirements: {wo.get('safety_requirements', 'N/A')}\n"
+        wo_text += f"  Estimated Cost: {wo.get('estimated_cost', 'N/A')}\n"
+        wo_text += f"  Actual Total Cost: {wo.get('actual_total_cost', 'N/A')}\n"
+
+        # Include tasks if available
+        tasks = wo.get('tasks', [])
+        if tasks:
+            wo_text += "  Tasks:\n"
+            for j, task in enumerate(tasks, 1):
+                wo_text += f"    Task {j}: {task.get('task_description', 'N/A')} (Status: {task.get('task_status', 'N/A')})\n"
+
+        formatted.append(wo_text)
+
+    return "\n".join(formatted)
+
+
+def _format_inspections_from_json(inspections: list) -> str:
+    """Format inspections JSON array into text for LLM consumption."""
+    if not inspections:
+        return "No historical inspection reports found."
+
+    formatted = []
+    for i, insp in enumerate(inspections, 1):
+        insp_text = f"[Inspection Report {i}]:\n"
+        insp_text += f"  Inspection ID: {insp.get('inspection_id', 'N/A')}\n"
+        insp_text += f"  Inspection Number: {insp.get('inspection_number', 'N/A')}\n"
+        insp_text += f"  Checklist: {insp.get('inspection_checklist_name', 'N/A')} ({insp.get('inspection_checklist_code', 'N/A')})\n"
+        insp_text += f"  Date: {insp.get('inspection_date', 'N/A')}\n"
+        insp_text += f"  Scheduled Date: {insp.get('scheduled_date', 'N/A')}\n"
+        insp_text += f"  Status: {insp.get('inspection_status', 'N/A')}\n"
+        insp_text += f"  Overall Result: {insp.get('overall_result', 'N/A')}\n"
+        insp_text += f"  Score: {insp.get('score', 'N/A')}/{insp.get('max_score', 'N/A')} ({insp.get('score_percentage', 'N/A')}%)\n"
+        insp_text += f"  Inspector: {insp.get('inspector_name', 'N/A')}\n"
+        insp_text += f"  Supervisor: {insp.get('supervisor_name', 'N/A')}\n"
+        insp_text += f"  Notes: {insp.get('inspection_notes', 'N/A')}\n"
+        insp_text += f"  Recommended Actions: {insp.get('recommended_actions', 'N/A')}\n"
+        insp_text += f"  Follow-up Required: {insp.get('follow_up_required', 'N/A')}\n"
+        insp_text += f"  Environmental Conditions: {insp.get('environmental_notes', 'N/A')}\n"
+
+        # Include inspection results if available
+        results = insp.get('results', [])
+        if results:
+            insp_text += "  Inspection Items:\n"
+            for j, result in enumerate(results, 1):
+                status = "PASS" if result.get('pass_fail') else "FAIL" if result.get('pass_fail') is False else result.get('response_value', 'N/A')
+                priority = result.get('priority', 'LOW')
+                insp_text += f"    {j}. [{result.get('checklist_section_name', 'N/A')}] {result.get('item_description', 'N/A')}\n"
+                insp_text += f"       Result: {status} | Priority: {priority}\n"
+                insp_text += f"       Instruction: {result.get('inspection_instruction', 'N/A')}\n"
+                if result.get('requires_action'):
+                    insp_text += f"       ACTION REQUIRED: {result.get('action_required', 'N/A')}\n"
+                if result.get('numeric_value') is not None:
+                    insp_text += f"       Measured Value: {result.get('numeric_value')}\n"
+
+        formatted.append(insp_text)
+
+    return "\n".join(formatted)
+
+
+def _format_service_schedules_from_json(schedules: list) -> str:
+    """Format service schedules JSON array into text for LLM consumption."""
+    if not schedules:
+        return "No service schedules found."
+
+    formatted = []
+    for i, sched in enumerate(schedules, 1):
+        sched_text = f"[Service Schedule {i}]:\n"
+        sched_text += f"  Schedule ID: {sched.get('schedule_id', sched.get('service_schedule_id', 'N/A'))}\n"
+        sched_text += f"  Maintenance Type: {sched.get('maintenance_type', 'N/A')}\n"
+        sched_text += f"  Description: {sched.get('description', 'N/A')}\n"
+        sched_text += f"  Frequency: {sched.get('frequency', 'N/A')}\n"
+        sched_text += f"  Last Performed: {sched.get('last_performed', sched.get('last_performed_date', 'N/A'))}\n"
+        sched_text += f"  Next Due: {sched.get('next_due', sched.get('next_due_date', 'N/A'))}\n"
+        sched_text += f"  Status: {sched.get('status', sched.get('compliance_status', 'N/A'))}\n"
+        sched_text += f"  Priority: {sched.get('priority', 'N/A')}\n"
+        formatted.append(sched_text)
+
+    return "\n".join(formatted)
+
+
+def _format_sensor_data_from_json(sensor_data: list) -> str:
+    """Format sensor data JSON array into text for LLM consumption."""
+    if not sensor_data:
+        return "No live sensor data provided."
+
+    formatted = []
+    for i, sensor in enumerate(sensor_data, 1):
+        # Handle different sensor data formats
+        name = sensor.get('name', sensor.get('sensor_name', sensor.get('parameter_name', 'Unknown')))
+        value = sensor.get('value', sensor.get('current_value', sensor.get('reading', 'N/A')))
+        unit = sensor.get('unit', sensor.get('unit_of_measure', ''))
+        status = sensor.get('status', 'normal')
+        timestamp = sensor.get('timestamp', sensor.get('reading_time', 'N/A'))
+
+        sensor_text = f"[Sensor {i}]: {name}\n"
+        sensor_text += f"  Current Value: {value} {unit}\n"
+        sensor_text += f"  Status: {status}\n"
+        sensor_text += f"  Timestamp: {timestamp}\n"
+
+        # Include thresholds if available
+        if sensor.get('threshold_min') is not None or sensor.get('threshold_max') is not None:
+            sensor_text += f"  Thresholds: Min={sensor.get('threshold_min', 'N/A')}, Max={sensor.get('threshold_max', 'N/A')}\n"
+
+        formatted.append(sensor_text)
+
+    return "\n".join(formatted)
+
+
+@app.post("/breakdown-prediction/direct")
+async def create_breakdown_prediction_direct(request: BreakdownPredictionDirectRequest):
+    """Generate breakdown prediction with optional direct data input.
+
+    This endpoint is designed for N8N and other integrations that may have
+    historical data available. Accepts either structured JSON arrays or
+    pre-formatted text strings for historical data.
+
+    Parameters:
+    - asset_info (required): Asset metadata as JSON object
+    - sensor_data (optional): Live sensor readings as JSON array
+    - work_orders (optional): Work orders as JSON array or pre-formatted text
+    - inspections (optional): Inspections as JSON array or pre-formatted text
+    - service_schedules (optional): Service schedules as JSON array or pre-formatted text
+    - maintenance_requests (optional): Maintenance requests as JSON array or pre-formatted text
+    - knowledge_base (optional): Knowledge base as pre-formatted text
+
+    For any data not provided, the system will attempt to retrieve it from
+    the vector database using the asset_id and optional collection_name.
+    """
+    if breakdown_agent is None:
+        raise HTTPException(status_code=503, detail="Breakdown prediction agent not initialized")
+
+    try:
+        prediction_id = str(uuid.uuid4())
+        asset_info_dict = request.asset_info
+        asset_id = asset_info_dict.get('asset_id', asset_info_dict.get('id', 'unknown'))
+        asset_name = asset_info_dict.get('asset_name', asset_info_dict.get('name', 'Unknown Asset'))
+
+        logger.info(f"Starting direct breakdown prediction {prediction_id} for asset {asset_id}")
+
+        # Format sensor data - handle JSON array
+        if request.sensor_data:
+            formatted_sensor_data = _format_sensor_data_from_json(request.sensor_data)
+        else:
+            formatted_sensor_data = "No live sensor data provided."
+
+        # Format work orders - handle JSON array or string
+        if request.work_orders is not None:
+            if isinstance(request.work_orders, list):
+                work_orders = _format_work_orders_from_json(request.work_orders)
+            else:
+                work_orders = request.work_orders
+        else:
+            logger.info(f"[Prediction {prediction_id}] Retrieving work orders from vector DB")
+            work_orders = await breakdown_agent.retrieve_work_orders(
+                asset_id, request.collection_name
+            )
+
+        # Format inspections - handle JSON array or string
+        if request.inspections is not None:
+            if isinstance(request.inspections, list):
+                inspections = _format_inspections_from_json(request.inspections)
+            else:
+                inspections = request.inspections
+        else:
+            logger.info(f"[Prediction {prediction_id}] Retrieving inspections from vector DB")
+            inspections = await breakdown_agent.retrieve_inspections(
+                asset_id, request.collection_name
+            )
+
+        # Format service schedules - handle JSON array or string
+        if request.service_schedules is not None:
+            if isinstance(request.service_schedules, list):
+                service_schedules = _format_service_schedules_from_json(request.service_schedules)
+            else:
+                service_schedules = request.service_schedules
+        else:
+            logger.info(f"[Prediction {prediction_id}] Retrieving service schedules from vector DB")
+            service_schedules = await breakdown_agent.retrieve_service_schedules(
+                asset_id, request.collection_name
+            )
+
+        # Format maintenance requests - handle JSON array or string
+        if request.maintenance_requests is not None:
+            if isinstance(request.maintenance_requests, list):
+                # Use same format as work orders for maintenance requests
+                maintenance_requests = _format_work_orders_from_json(request.maintenance_requests)
+            else:
+                maintenance_requests = request.maintenance_requests
+        else:
+            logger.info(f"[Prediction {prediction_id}] Retrieving maintenance requests from vector DB")
+            maintenance_requests = await breakdown_agent.retrieve_maintenance_requests(
+                asset_id, request.collection_name
+            )
+
+        # Knowledge base is always text
+        knowledge_base = request.knowledge_base
+        if knowledge_base is None:
+            logger.info(f"[Prediction {prediction_id}] Retrieving knowledge base from vector DB")
+            knowledge_base = await breakdown_agent.retrieve_knowledge_base(
+                request.collection_name
+            )
+
+        # Generate prediction with LLM
+        logger.info(f"[Prediction {prediction_id}] Generating prediction with LLM")
+        prediction = await breakdown_agent.generate_prediction(
+            asset_info=asset_info_dict,
+            work_orders=work_orders,
+            inspections=inspections,
+            service_schedules=service_schedules,
+            maintenance_requests=maintenance_requests,
+            knowledge_base=knowledge_base,
+            sensor_data=formatted_sensor_data
+        )
+
+        # Build result with metadata
+        from datetime import datetime
+        result = {
+            "prediction_id": prediction_id,
+            "asset_id": asset_id,
+            "asset_name": asset_name,
+            "generated_at": datetime.utcnow().isoformat(),
+            "prediction": prediction,
+            "data_sources": {
+                "work_orders_provided": request.work_orders is not None,
+                "inspections_provided": request.inspections is not None,
+                "service_schedules_provided": request.service_schedules is not None,
+                "maintenance_requests_provided": request.maintenance_requests is not None,
+                "knowledge_base_provided": request.knowledge_base is not None,
+                "sensor_data_provided": request.sensor_data is not None,
+                "work_orders_retrieved": request.work_orders is None and "No historical work orders" not in work_orders,
+                "inspections_retrieved": request.inspections is None and "No historical inspection" not in inspections,
+                "service_schedules_retrieved": request.service_schedules is None and "No service schedules" not in service_schedules,
+                "maintenance_requests_retrieved": request.maintenance_requests is None and "No maintenance requests" not in maintenance_requests,
+                "knowledge_base_retrieved": request.knowledge_base is None and "No relevant knowledge" not in knowledge_base
+            }
+        }
+
+        logger.info(f"[Prediction {prediction_id}] Direct prediction completed successfully")
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in direct breakdown prediction: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error generating prediction: {str(e)}")
+
+
+@app.post("/breakdown-prediction/batch")
+async def create_batch_breakdown_prediction(
+    request: BatchBreakdownPredictionRequest,
+    background_tasks: BackgroundTasks
+):
+    """Generate breakdown predictions for multiple assets.
+
+    Args:
+        request: Batch prediction request with list of assets
+        background_tasks: FastAPI background tasks manager
+
+    Returns:
+        Batch job information for tracking
+
+    Example:
+        POST /breakdown-prediction/batch
+        {
+            "assets": [
+                {
+                    "asset_info": {"asset_id": "PUMP-001", "asset_name": "Main Pump"},
+                    "sensor_data": [{"name": "Vibration", "value": 12.5, "unit": "mm/s"}]
+                },
+                {
+                    "asset_info": {"asset_id": "MOTOR-002", "asset_name": "Drive Motor"},
+                    "sensor_data": [{"name": "Temperature", "value": 75, "unit": "C"}]
+                }
+            ],
+            "collection_name": "maintenance_docs"
+        }
+    """
+    if breakdown_agent is None:
+        raise HTTPException(status_code=503, detail="Breakdown prediction agent not initialized")
+
+    try:
+        if not request.assets:
+            raise HTTPException(status_code=400, detail="No assets provided")
+
+        if len(request.assets) > 50:
+            raise HTTPException(status_code=400, detail="Maximum 50 assets per batch")
+
+        batch_id = str(uuid.uuid4())
+        prediction_tasks[batch_id] = "queued"
+
+        async def process_batch():
+            try:
+                prediction_tasks[batch_id] = "processing"
+                results = await breakdown_agent.predict_batch(
+                    assets=request.assets,
+                    collection_name=request.collection_name
+                )
+                prediction_tasks[batch_id] = "completed"
+
+                # Store results in database
+                await postgres_storage.store_batch_predictions(batch_id, results)
+
+            except Exception as e:
+                logger.error(f"Batch prediction {batch_id} failed: {e}")
+                prediction_tasks[batch_id] = f"failed: {str(e)}"
+
+        background_tasks.add_task(process_batch)
+
+        logger.info(f"Batch breakdown prediction queued: {batch_id} with {len(request.assets)} assets")
+
+        return {
+            "batch_id": batch_id,
+            "status": "queued",
+            "total_assets": len(request.assets)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating batch prediction: {e}")
+        raise HTTPException(status_code=500, detail=f"Error creating batch prediction: {str(e)}")
+
+
+@app.get("/breakdown-prediction/batch/{batch_id}/status")
+async def get_batch_prediction_status(batch_id: str):
+    """Get the status of a batch breakdown prediction job.
+
+    Args:
+        batch_id: Batch identifier
+
+    Returns:
+        Current batch job status
+    """
+    if batch_id in prediction_tasks:
+        return {"batch_id": batch_id, "status": prediction_tasks[batch_id]}
+    else:
+        raise HTTPException(status_code=404, detail=f"Batch prediction {batch_id} not found")
+
+
+@app.get("/breakdown-prediction/batch/{batch_id}/results")
+async def get_batch_prediction_results(batch_id: str):
+    """Get the results of a completed batch breakdown prediction.
+
+    Args:
+        batch_id: Batch identifier
+
+    Returns:
+        List of prediction results for all assets
+    """
+    try:
+        if batch_id not in prediction_tasks:
+            raise HTTPException(status_code=404, detail=f"Batch prediction {batch_id} not found")
+
+        status = prediction_tasks[batch_id]
+        if status != "completed":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Batch prediction not completed. Current status: {status}"
+            )
+
+        results = await postgres_storage.get_batch_predictions(batch_id)
+
+        return {
+            "batch_id": batch_id,
+            "status": "completed",
+            "results": results
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting batch results: {str(e)}")
+
+
+@app.get("/breakdown-prediction/asset/{asset_id}/history")
+async def get_asset_prediction_history(asset_id: str, limit: int = 10):
+    """Get prediction history for a specific asset.
+
+    Args:
+        asset_id: Asset identifier
+        limit: Maximum number of predictions to return
+
+    Returns:
+        List of historical predictions for the asset
+    """
+    try:
+        predictions = await postgres_storage.get_asset_predictions(asset_id, limit=limit)
+        return {
+            "asset_id": asset_id,
+            "predictions": predictions,
+            "count": len(predictions)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting prediction history: {str(e)}")
+
+
+@app.get("/breakdown-prediction/{prediction_id}")
+async def get_prediction(prediction_id: str):
+    """Get a specific breakdown prediction by ID.
+
+    Args:
+        prediction_id: Prediction identifier
+
+    Returns:
+        Complete prediction details
+    """
+    try:
+        prediction = await postgres_storage.get_breakdown_prediction(prediction_id)
+
+        if not prediction:
+            raise HTTPException(status_code=404, detail=f"Prediction {prediction_id} not found")
+
+        return prediction
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting prediction: {str(e)}")
+
+
+@app.delete("/breakdown-prediction/{prediction_id}")
+async def delete_prediction(prediction_id: str):
+    """Delete a breakdown prediction.
+
+    Args:
+        prediction_id: Prediction identifier
+
+    Returns:
+        Success status
+    """
+    try:
+        success = await postgres_storage.delete_breakdown_prediction(prediction_id)
+
+        if success:
+            return {"status": "success", "message": f"Prediction {prediction_id} deleted"}
+        else:
+            raise HTTPException(status_code=404, detail=f"Prediction {prediction_id} not found")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting prediction: {str(e)}")
+
+
+@app.get("/breakdown-prediction/summary/high-risk")
+async def get_high_risk_assets(risk_threshold: float = 50.0, limit: int = 20):
+    """Get assets with high breakdown risk.
+
+    Args:
+        risk_threshold: Minimum breakdown probability to include (default 50%)
+        limit: Maximum number of results
+
+    Returns:
+        List of high-risk asset predictions
+    """
+    try:
+        high_risk = await postgres_storage.get_high_risk_predictions(
+            threshold=risk_threshold,
+            limit=limit
+        )
+        return {
+            "risk_threshold": risk_threshold,
+            "high_risk_assets": high_risk,
+            "count": len(high_risk)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting high-risk assets: {str(e)}")
 
 
 if __name__ == "__main__":

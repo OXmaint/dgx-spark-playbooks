@@ -535,13 +535,17 @@ class VectorStore:
                 pass
     
     
+    # ----------------------------------------------------------------------
+    #   Retrieval
+    # ---------------------------------------------------------------------- 
+
     def get_documents(
-        self,
-        query: str,
-        k: int = 8,
-        sources: Optional[List[str]] = None,
-        collection_name: Optional[str] = None, 
-        doc_type: Optional[str] = 'document', # NEW
+    self,
+    query: str,
+    k: int = 8,
+    sources: Optional[List[str]] = None,
+    collection_name: Optional[str] = None, 
+    doc_type: Optional[str] = 'document', # NEW
     ) -> List[Document]:
         """Retrieve similar documents by embedding similarity from a target collection."""
         try:
@@ -570,6 +574,92 @@ class VectorStore:
             return docs
         except Exception as e:
             logger.error({"message": "Error retrieving documents", "error": str(e)}, exc_info=True)
+            return []
+        finally:
+            try:
+                connections.disconnect("default")
+            except Exception:
+                pass
+
+    def get_recent_documents(
+        self,
+        k: int = 8,
+        collection_name: Optional[str] = None,
+        metadata_filter: Optional[dict] = None
+    ) -> List["Document"]:
+        """
+        Fetch the last k entries from a target collection with optional filtering 
+        on metadata fields (such as type, asset_id, etc).
+
+        Args:
+            k: Number of recent documents to fetch.
+            collection_name: Optional collection to fetch from.
+            metadata_filter: Optional dict specifying filter conditions. 
+                             Keys are field names, values are exact matches.
+
+        Returns:
+            List of Document objects.
+        """
+        try:
+            target = self.default_collection_name() if not collection_name else self._sanitize_collection(collection_name)
+            store = self._get_store_for(target)
+            # Prepare filter expression if needed (for Milvus, use expr)
+            filter_exprs = []
+            if metadata_filter:
+                for key, value in metadata_filter.items():
+                    # Value could be int/float/str; quote for string-like.
+                    if isinstance(value, str):
+                        filter_exprs.append(f'{key} == "{value}"')
+                    else:
+                        filter_exprs.append(f'{key} == {value}')
+            expr = " && ".join(filter_exprs) if filter_exprs else None
+
+            try:
+                # Milvus: _collection_object.query for custom queries (bypassing embedding search)
+                col = store._collection
+                col.load()
+                # Get schema to ensure required fields exist (e.g., "page_content")
+                output_fields = ["page_content", "metadata"] if "metadata" in [f.name for f in col.schema.fields] else ["page_content"]
+                query_args = {
+                    "expr": expr if expr else "",
+                    "output_fields": output_fields,
+                    "limit": k,
+                    "offset": 0,
+                    "order_by": "created_at desc" if "created_at" in [f.name for f in col.schema.fields] else None
+                }
+                # Remove None values for Milvus sdk
+                query_args = {k: v for k, v in query_args.items() if v is not None}
+
+                results = col.query(**query_args)
+                docs = []
+                for row in results:
+                    # postprocess into Document objects (LangChain's Document or your doc class)
+                    from langchain.schema import Document
+                    content = row.get("page_content", "")
+                    metadata = row.get("metadata", {})
+                    if not metadata:
+                        # Try to collate individual metadata fields
+                        metadata = {k: v for k, v in row.items() if k != "page_content"}
+                    docs.append(Document(page_content=content, metadata=metadata))
+                logger.debug({
+                    "message": "Fetched recent documents",
+                    "count": len(docs),
+                    "collection": target,
+                    "expr": expr
+                })
+                return docs
+
+            except Exception as e:
+                logger.error({
+                    "message": "Milvus error getting recent documents",
+                    "error": str(e),
+                    "collection": target,
+                    "expr": expr
+                }, exc_info=True)
+                return []
+
+        except Exception as e:
+            logger.error({"message": "Error fetching recent documents", "error": str(e)}, exc_info=True)
             return []
 
     # ---------------------------------------------------------------------- #

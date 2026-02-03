@@ -23,8 +23,8 @@ import OrganizationSelector from "@/components/OrganizationSelector";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Spark Chat",
-  description: "AI-powered chat interface",
+  title: "Oxmaint Synapse UI",
+  description: "AI-powered maintenance intelligence platform",
 };
 
 export default function RootLayout({

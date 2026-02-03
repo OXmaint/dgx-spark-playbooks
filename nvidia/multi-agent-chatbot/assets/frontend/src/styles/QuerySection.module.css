@@ -201,7 +201,7 @@
 }
 
 .userMessage {
-  background-color: #76B900;
+  background-color: var(--primary);
   color: white;
   padding: 12px 16px;
   border-radius: 12px;
@@ -212,7 +212,7 @@
 }
 
 :global(.dark) .userMessage {
-  background-color: #76B900;
+  background-color: var(--primary);
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
@@ -437,8 +437,8 @@
 }
 
 .messageInput:focus {
-  border-color: #76B900;
-  box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.2);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(26, 26, 108, 0.2);
 }
 
 .sendButton, .streamingCancelButton {
@@ -476,11 +476,11 @@
 }
 
 .sendButton {
-  background-color: #76B900;
+  background-color: var(--primary);
 }
 
 .sendButton:hover {
-  background-color: #669f00;
+  background-color: var(--primary-dark);
 }
 
 .sendButton:disabled {
@@ -598,17 +598,17 @@
 
 .textarea:focus {
   outline: none;
-  border-color: #76B900;
-  box-shadow: 0 0 0 3px rgba(118, 185, 0, 0.2);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(26, 26, 108, 0.2);
 }
 
 :global(.dark) .textarea:focus {
-  box-shadow: 0 0 0 3px rgba(118, 185, 0, 0.4);
+  box-shadow: 0 0 0 3px rgba(129, 140, 248, 0.4);
 }
 
 .sendButton {
   padding: 0 16px;
-  background-color: #76B900;
+  background-color: var(--primary);
   color: white;
   border: none;
   border-radius: 8px;
@@ -620,7 +620,7 @@
 }
 
 .sendButton:hover {
-  background-color: #669f00;
+  background-color: var(--primary-dark);
 }
 
 .sendButton:disabled {
@@ -631,13 +631,13 @@
 .dot {
   width: 8px;
   height: 8px;
-  background-color: #76B900;
+  background-color: var(--primary);
   border-radius: 50%;
   animation: bounce 1.4s infinite ease-in-out;
 }
 
 :global(.dark) .dot {
-  background-color: #76B900;
+  background-color: var(--primary);
 }
 
 .dot:nth-child(1) { animation-delay: -0.32s; }
@@ -799,8 +799,8 @@
 }
 
 .toolHeader {
-  border-color: #76B900;
-  box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.2);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(26, 26, 108, 0.2);
   padding: 12px 16px;
   background-color: var(--primary-dark);
   opacity: 0.6;

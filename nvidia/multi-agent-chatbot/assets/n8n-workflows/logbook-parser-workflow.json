@@ -1,0 +1,165 @@
+{
+  "name": "Logbook Entry Parser",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "parse-logbook",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - Receive Logbook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "parse-logbook-webhook"
+    },
+    {
+      "parameters": {
+        "operation": "binaryToPropery",
+        "options": {}
+      },
+      "id": "move-binary",
+      "name": "Binary to JSON",
+      "type": "n8n-nodes-base.moveBinaryData",
+      "typeVersion": 1.0,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Prepare data for Logbook Parsing via VLM\nconst item = $input.item;\n\n// Get optional user prompt from original webhook\nconst webhookItem = $('Webhook - Receive Logbook').first();\nconst additionalPrompt = webhookItem.json?.body?.user_prompt || webhookItem.json?.body?.query || '';\n\n// Get base64 data from moveBinaryData output\nconst base64Data = item.json?.data || '';\n\n// Get mime type from the json output or default\nlet mimeType = item.json?.mimeType || 'image/jpeg';\n\n// System prompt for logbook parsing\nconst systemPrompt = `You are an expert logbook entry parser. Your task is to extract structured data from logbook page images with high accuracy.\n\n## LOGBOOK STRUCTURE:\n\n1. **DATE** (Top Right Corner)\n   - Format: Look for date in DD/MM/YYYY or similar format\n   - Located at the top right area of the page\n\n2. **SHIFT ABBREVIATION** (Center-Left of page, near date level)\n   - Single letter: A, B, or C\n   - Indicates which shift recorded this entry\n\n3. **PEOPLE INVOLVED** (Top Right Corner, below date)\n   - Names or initials of personnel on duty\n   - May include roles/designations\n\n4. **SECTIONS** (Center of page)\n   - There are 13 known sections total\n   - Each section may have associated readings\n\n5. **METER READINGS** (Tabular format, center of page beside sections)\n   - HC0: HC0 reading\n   - HC1: HC1 reading\n   - These are in a table format next to the sections\n   - Extract numeric values for each\n\n6. **TASKS DONE / DESCRIPTION OF WORK** (Bottom of page)\n   - Section labeled \"Description of work\" or similar\n   - Contains open paragraph lines describing maintenance/operational tasks\n   - May include multiple entries\n\n## OUTPUT FORMAT:\nYou MUST respond with ONLY a valid JSON object (no markdown, no explanation, no code blocks). The JSON structure:\n\n{\n  \"date\": \"extracted date string\",\n  \"shift\": \"A\" | \"B\" | \"C\",\n  \"people_involved\": [\"name1\", \"name2\"],\n  \"sections\": [\n    {\n      \"section_number\": 1,\n      \"section_name\": \"name if visible\",\n      \"hc0_reading\": number or null,\n      \"hc1_reading\": number or null\n    }\n  ],\n  \"meter_readings_summary\": {\n    \"total_hc0\": number or null,\n    \"total_hc1\": number or null\n  },\n  \"tasks_done\": [\n    {\n      \"description\": \"task description text\",\n      \"details\": \"additional details if any\"\n    }\n  ],\n  \"raw_observations\": \"any additional observations or notes from the page\",\n  \"parsing_confidence\": \"high\" | \"medium\" | \"low\",\n  \"parsing_notes\": \"any issues or uncertainties encountered during parsing\"\n}\n\n## IMPORTANT RULES:\n1. If a field is not visible or readable, use null for that field\n2. For meter readings, extract exact numeric values where possible\n3. For tasks, preserve the original text as written\n4. Note any handwriting that is unclear in parsing_notes\n5. ONLY output valid JSON - no other text`;\n\n// Combine with optional user prompt\nlet userMessage = 'Parse this logbook entry image and extract all structured data according to your instructions.';\nif (additionalPrompt) {\n  userMessage += ' Additional context: ' + additionalPrompt;\n}\n\nreturn {\n  json: {\n    base64_data: base64Data,\n    mime_type: mimeType,\n    system_prompt: systemPrompt,\n    user_prompt: userMessage\n  }\n};"
+      },
+      "id": "code-prepare",
+      "name": "Prepare Logbook Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://qwen3-vl:8000/v1/chat/completions",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  \"model\": \"qwen3-vl\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": $json.system_prompt\n    },\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"text\",\n          \"text\": $json.user_prompt\n        },\n        {\n          \"type\": \"image_url\",\n          \"image_url\": {\n            \"url\": \"data:\" + $json.mime_type + \";base64,\" + $json.base64_data\n          }\n        }\n      ]\n    }\n  ],\n  \"max_tokens\": 4096,\n  \"temperature\": 0.1\n} }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 180000
+        }
+      },
+      "id": "http-request-vlm",
+      "name": "Call Qwen3-VL Parser",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Parse the VLM response and extract JSON\nconst item = $input.item;\n\nlet vlmResponse = item.json?.choices?.[0]?.message?.content || '';\n\n// Try to parse as JSON\nlet parsedData = null;\nlet parseError = null;\n\ntry {\n  // Remove any markdown code blocks if present\n  vlmResponse = vlmResponse.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  \n  // Try to find JSON object in the response\n  const jsonMatch = vlmResponse.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    parsedData = JSON.parse(jsonMatch[0]);\n  } else {\n    parsedData = JSON.parse(vlmResponse);\n  }\n} catch (e) {\n  parseError = e.message;\n  parsedData = {\n    error: 'Failed to parse VLM response as JSON',\n    raw_response: vlmResponse,\n    parse_error: parseError\n  };\n}\n\nreturn {\n  json: {\n    success: !parseError,\n    logbook_data: parsedData,\n    model: item.json?.model || 'qwen3-vl',\n    processed_at: new Date().toISOString()\n  }\n};"
+      },
+      "id": "code-parse-response",
+      "name": "Parse VLM Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"success\": false, \"error\": $json.message || $json.error?.message || \"Logbook parsing failed\" } }}",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id": "error-response",
+      "name": "Error Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1050, 500]
+    }
+  ],
+  "connections": {
+    "Webhook - Receive Logbook": {
+      "main": [
+        [
+          {
+            "node": "Binary to JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Binary to JSON": {
+      "main": [
+        [
+          {
+            "node": "Prepare Logbook Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Logbook Request": {
+      "main": [
+        [
+          {
+            "node": "Call Qwen3-VL Parser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Qwen3-VL Parser": {
+      "main": [
+        [
+          {
+            "node": "Parse VLM Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse VLM Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "pinData": {}
+}

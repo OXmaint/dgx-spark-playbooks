@@ -1,0 +1,143 @@
+{
+  "name": "Image Understanding with Qwen3-VL",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "image-understand",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - Receive Image",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "image-understand-webhook"
+    },
+    {
+      "parameters": {
+        "operation": "binaryToPropery",
+        "options": {}
+      },
+      "id": "move-binary",
+      "name": "Binary to JSON",
+      "type": "n8n-nodes-base.moveBinaryData",
+      "typeVersion": 1.0,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Prepare data for VLM API call\nconst item = $input.item;\n\n// Get user prompt from original webhook\nconst webhookItem = $('Webhook - Receive Image').first();\nconst userPrompt = webhookItem.json?.body?.user_prompt || webhookItem.json?.body?.query || \"Describe this image in detail.\";\n\n// Get base64 data from moveBinaryData output\nconst base64Data = item.json?.data || '';\n\n// Get mime type from the json output or default\nlet mimeType = item.json?.mimeType || 'image/jpeg';\n\nreturn {\n  json: {\n    base64_data: base64Data,\n    mime_type: mimeType,\n    user_prompt: userPrompt\n  }\n};"
+      },
+      "id": "code-prepare",
+      "name": "Prepare Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://qwen3-vl:8000/v1/chat/completions",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  \"model\": \"qwen3-vl\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"text\",\n          \"text\": $json.user_prompt\n        },\n        {\n          \"type\": \"image_url\",\n          \"image_url\": {\n            \"url\": \"data:\" + $json.mime_type + \";base64,\" + $json.base64_data\n          }\n        }\n      ]\n    }\n  ],\n  \"max_tokens\": 1024,\n  \"temperature\": 0.1\n} }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "http-request-vlm",
+      "name": "Call Qwen3-VL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ {\n  \"success\": true,\n  \"response\": $json.choices[0].message.content,\n  \"model\": $json.model || \"qwen3-vl\",\n  \"processed_at\": $now.toISO()\n} }}",
+        "options": {}
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"success\": false, \"error\": $json.message || $json.error?.message || \"Image understanding failed\" } }}",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id": "error-response",
+      "name": "Error Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [850, 500]
+    }
+  ],
+  "connections": {
+    "Webhook - Receive Image": {
+      "main": [
+        [
+          {
+            "node": "Binary to JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Binary to JSON": {
+      "main": [
+        [
+          {
+            "node": "Prepare Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Request": {
+      "main": [
+        [
+          {
+            "node": "Call Qwen3-VL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Qwen3-VL": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "pinData": {}
+}

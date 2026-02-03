@@ -30,13 +30,13 @@
 }
 
 .dropZone:hover {
-  border-color: #76B900;
-  background-color: #f0f9e8;
+  border-color: var(--primary);
+  background-color: #eef2ff;
 }
 
 .dropZone.dragging {
-  border-color: #76B900;
-  background-color: #e8f5d8;
+  border-color: var(--primary);
+  background-color: #e0e7ff;
   transform: scale(1.02);
 }
 
@@ -46,7 +46,7 @@
 }
 
 :global(.dark) .dropZone:hover {
-  border-color: #76B900;
+  border-color: var(--primary);
   background-color: #2d3748;
 }
 
@@ -68,7 +68,7 @@
 .uploadIcon {
   width: 48px;
   height: 48px;
-  color: #76B900;
+  color: var(--primary);
   margin-bottom: 8px;
 }
 
@@ -90,7 +90,7 @@
 
 .uploadButton {
   padding: 10px 24px;
-  background-color: #76B900;
+  background-color: var(--primary);
   color: white;
   border: none;
   border-radius: 8px;
@@ -101,7 +101,7 @@
 }
 
 .uploadButton:hover:not(:disabled) {
-  background-color: #669f00;
+  background-color: var(--primary-dark);
 }
 
 .uploadButton:disabled {

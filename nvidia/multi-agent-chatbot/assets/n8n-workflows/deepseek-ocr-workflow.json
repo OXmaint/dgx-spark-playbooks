@@ -1,0 +1,145 @@
+{
+  "name": "DeepSeek OCR Workflow with LLM",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ocr",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - Receive File",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "ocr-webhook"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://deepseek-ocr:8000/ocr",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            },
+            {
+              "parameterType": "formData",
+              "name": "output_file",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 300000
+        }
+      },
+      "id": "http-request-ocr",
+      "name": "Call DeepSeek OCR",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://gpt-oss-20b:8000/v1/chat/completions",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  \"model\": \"gpt-oss-20b\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an intelligent assistant that analyzes OCR (Optical Character Recognition) output. The user will provide you with raw OCR text extracted from a document or image. Your task is to:\\n\\n1. Understand and interpret the OCR content\\n2. Correct any obvious OCR errors or typos\\n3. Structure the information in a clear, readable format\\n4. Extract key information, entities, or data points\\n5. Summarize the main content if it's lengthy\\n\\nBe helpful and provide insights about what the document appears to be (e.g., invoice, form, letter, handwritten note, etc.).\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Here is the OCR output from a document:\\n\\n\" + $json.data + \"\\n\\n\" + ($('Webhook - Receive File').first().json.body.user_prompt || \"Please analyze this OCR output and tell me what you understand from it.\")\n    }\n  ],\n  \"temperature\": 0.7,\n  \"max_tokens\": 2048\n} }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "http-request-llm",
+      "name": "Process with LLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [750, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ {\n  \"success\": true,\n  \"ocr_raw\": $('Call DeepSeek OCR').first().json.data,\n  \"llm_analysis\": $json.choices[0].message.content,\n  \"model_used\": $json.model || \"gpt-oss-20b\",\n  \"processed_at\": $now.toISO()\n} }}",
+        "options": {}
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1000, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"success\": false, \"error\": $json.message || \"Processing failed\", \"stage\": \"unknown\" } }}",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id": "error-response",
+      "name": "Error Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [750, 500]
+    }
+  ],
+  "connections": {
+    "Webhook - Receive File": {
+      "main": [
+        [
+          {
+            "node": "Call DeepSeek OCR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call DeepSeek OCR": {
+      "main": [
+        [
+          {
+            "node": "Process with LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process with LLM": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "pinData": {}
+}

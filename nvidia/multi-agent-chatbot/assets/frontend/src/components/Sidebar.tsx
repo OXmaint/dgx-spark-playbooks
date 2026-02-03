@@ -572,7 +572,14 @@ export default function Sidebar({
               ×
             </button>
             <div className={styles.sidebarHeader}>
-              <h2 className={styles.title}>Spark Chat</h2>
+              <div className={styles.logoContainer}>
+                <img
+                  src="/logo.png"
+                  alt="Oxmaint AI"
+                  className={styles.logo}
+                />
+              </div>
+              <h2 className={styles.title}>Synapse UI</h2>
             </div>
             
             {/* Model Selection */}
