@@ -160,9 +160,15 @@ class ChatAgent:
             if model_name in available_models:
                 self.current_model = model_name
                 logger.info(f"Switched to model: {model_name}")
-                self.model_client = AsyncOpenAI(
-                    base_url=f"http://{self.current_model}:8000/v1",
+                
+                   #Use Ollama for llama3-oxmaint model
+                   if model_name == "llama-oxmaint":
+                   self.model_client = AsyncOpenAI(
+                    base_url="http://host.docker.internal:11434/v1,
                     api_key="api_key"
+                    #self.model_client = AsyncOpenAI(
+                    #base_url=f"http://{self.current_model}:8000/v1",
+                    #api_key="api_key"
                 )
             else:
                 raise ValueError(f"Model {model_name} is not available. Available models: {available_models}")

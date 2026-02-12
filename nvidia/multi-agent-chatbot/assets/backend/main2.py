@@ -24,26 +24,21 @@ from fastapi import FastAPI, File, Form, UploadFile, HTTPException, BackgroundTa
 from fastapi.middleware.cors import CORSMiddleware
 
 from agent import ChatAgent
-from batch_agent import BatchAnalysisAgent
 from config import ConfigManager
-from cron_manager import CronJobManager
 from logger import logger, log_request, log_response, log_error
-from models import ChatIdRequest, ChatRenameRequest, SelectedModelRequest, ImageDescriptionRequest, BatchAnalysisRequest, CronJobRequest, CronJobUpdateRequest
+from models import ChatIdRequest, ChatRenameRequest, SelectedModelRequest
 from postgres_storage import PostgreSQLConversationStorage
-from report_generator import ReportGenerator
-from utils import process_and_ingest_files_background, process_batch_analysis_background
+from utils import process_and_ingest_files_background
 from vector_store import create_vector_store_with_config
 
 from work_order_summarizer import WorkOrderSummarizer
 from work_order_service import WorkOrderService
 
-from org_ingest_service import OrgJsonIngestService
-from inspection_summarizer import InspectionSummarizer
-from maintenance_request_summarizer import MaintenanceRequestSummarizer
-from pm_schedule_summarizer import PmScheduleSummarizer
-
 from pymilvus import connections, Collection, utility
 import json as _json
+
+
+
 
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
@@ -69,58 +64,19 @@ vector_store._initialize_store()
 work_order_summarizer: WorkOrderSummarizer | None = None
 work_order_service: WorkOrderService | None = None
 
-inspection_summarizer: InspectionSummarizer | None = None
-inspection_service: OrgJsonIngestService | None = None
 
-maintenance_request_summarizer: MaintenanceRequestSummarizer | None = None
-maintenance_request_service: OrgJsonIngestService | None = None
 
-pm_schedule_summarizer: PmScheduleSummarizer | None = None
-pm_schedule_service: OrgJsonIngestService | None = None
 
 agent: ChatAgent | None = None
-batch_agent: BatchAnalysisAgent | None = None
-report_generator: ReportGenerator | None = None
-cron_manager: CronJobManager | None = None
 indexing_tasks: Dict[str, str] = {}
-
-
-def sanitize_org_for_collection(org_id: str) -> str:
-    """
-    Turn an org_id / collection hint into a valid Milvus collection name.
-
-    - Only [A-Za-z0-9_] allowed
-    - First character must be a letter or '_'
-    - We prefix with 'org_' if needed
-    """
-    base = "".join(c if c.isalnum() or c == "_" else "_" for c in str(org_id))
-    if not base or not (base[0].isalpha() or base[0] == "_"):
-        base = "org_" + base
-    return base
-
-def _org_to_collection_name(org_id: str) -> str:
-    """
-    Convert an organization_id into a Milvus-safe collection name,
-    consistent with WorkOrderService / OrgJsonIngestService.
-    """
-    base = "".join(c if c.isalnum() or c == "_" else "_" for c in str(org_id))
-    if not base or not (base[0].isalpha() or base[0] == "_"):
-        base = "org_" + base
-    return base
-
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown tasks."""
-    global agent
-    global work_order_summarizer, work_order_service
-    global inspection_summarizer, inspection_service
-    global maintenance_request_summarizer, maintenance_request_service
-    global pm_schedule_summarizer, pm_schedule_service
-
+    global agent, work_order_summarizer, work_order_service
     logger.debug("Initializing PostgreSQL storage and agent...")
-
+    
     try:
         await postgres_storage.init_pool()
         logger.info("PostgreSQL storage initialized successfully")
@@ -145,53 +101,14 @@ async def lifespan(app: FastAPI):
             summarizer=work_order_summarizer
         )
         logger.info("Work Order Service initialized successfully.")
-
-        # Initialize inspection / maintenance / PM summarizers and ingest services
-        logger.debug("Initializing Inspection Summarizer and Service...")
-        inspection_summarizer = InspectionSummarizer(
-            model_host=config_manager.get_selected_model(),
-            model_port=8000
-        )
-        inspection_service = OrgJsonIngestService(
-            vector_store=vector_store,
-            summarizer=inspection_summarizer.summarize_inspection,
-            doc_type="inspection",
-            id_field="id",
-        )
-
-        logger.debug("Initializing Maintenance Request Summarizer and Service...")
-        maintenance_request_summarizer = MaintenanceRequestSummarizer(
-            model_host=config_manager.get_selected_model(),
-            model_port=8000
-        )
-        maintenance_request_service = OrgJsonIngestService(
-            vector_store=vector_store,
-            summarizer=maintenance_request_summarizer.summarize_request,
-            doc_type="maintenance_request",
-            id_field="id",
-        )
-
-        logger.debug("Initializing PM Schedule Summarizer and Service...")
-        pm_schedule_summarizer = PmScheduleSummarizer(
-            model_host=config_manager.get_selected_model(),
-            model_port=8000
-        )
-        pm_schedule_service = OrgJsonIngestService(
-            vector_store=vector_store,
-            summarizer=pm_schedule_summarizer.summarize_pm,
-            doc_type="pm_schedule",
-            id_field="id",
-        )
-
+        
     except Exception as e:
         logger.error(f"Failed to initialize services: {e}")
         raise
 
     yield
-
+    
     try:
-        if cron_manager:
-            cron_manager.shutdown()
         await postgres_storage.close()
         logger.debug("PostgreSQL storage closed successfully")
     except Exception as e:
@@ -376,22 +293,12 @@ async def get_organization_stats(organization_id: str):
 async def ingest_files(
     background_tasks: BackgroundTasks,
     files: Optional[List[UploadFile]] = File(None),
-    collection: Optional[str] = Form(None),
+    collection: Optional[str] = Form(None),  # NEW
     doc_type: Optional[str] = Form(None),
 ):
-    """Ingest documents for vector search and RAG (optionally to a specific collection).
-
-    collection is typically the org_id. doc_type can be 'docs', 'knowledge', etc.
-    """
+    """Ingest documents for vector search and RAG (optionally to a specific collection)."""
     try:
-        log_request(
-            {
-                "file_count": len(files) if files else 0,
-                "collection": collection,
-                "doc_type": doc_type,
-            },
-            "/ingest",
-        )
+        log_request({"file_count": len(files) if files else 0, "collection": collection}, "/ingest")
         
         if not files:
             raise HTTPException(status_code=400, detail="No files were uploaded.")
@@ -415,8 +322,8 @@ async def ingest_files(
             config_manager,
             task_id,
             indexing_tasks,
-            collection,
-            doc_type,
+            collection,  # NEW
+            doc_type
         )
         
         response = {
@@ -425,7 +332,6 @@ async def ingest_files(
             "status": "queued",
             "task_id": task_id,
             "collection": collection or vector_store.default_collection_name(),
-            "doc_type": doc_type,
         }
         
         log_response(response, "/ingest")
@@ -446,118 +352,6 @@ async def get_indexing_status(task_id: str):
         return {"status": indexing_tasks[task_id]}
     else:
         raise HTTPException(status_code=404, detail="Task not found")
-
-# ---------------------------------------------------------------------------------------
-# NEW: Org-scoped ingest endpoints (as per boss instructions)
-# ---------------------------------------------------------------------------------------
-
-@app.post("/ingest/docs")
-async def ingest_docs(
-    background_tasks: BackgroundTasks,
-    org_id: str = Form(...),
-    files: List[UploadFile] = File(...),
-):
-    """
-    Ingest generic documents for an organization.
-    Stored in collection=<org_...> with doc_type='docs'.
-    """
-    collection = _org_to_collection_name(org_id)
-
-    return await ingest_files(
-        background_tasks=background_tasks,
-        files=files,
-        collection=collection,
-        doc_type="docs",
-    )
-
-
-@app.post("/ingest/knowledge")
-async def ingest_knowledge(
-    background_tasks: BackgroundTasks,
-    org_id: str = Form(...),
-    files: List[UploadFile] = File(...),
-):
-    """
-    Ingest knowledge base documents for an organization.
-    Stored in collection=<org_...> with doc_type='knowledge'.
-    """
-    collection = _org_to_collection_name(org_id)
-
-    return await ingest_files(
-        background_tasks=background_tasks,
-        files=files,
-        collection=collection,
-        doc_type="knowledge",
-    )
-
-
-
-@app.post("/ingest/wo")
-async def ingest_work_order(payload: Dict[str, Any]):
-    """
-    Ingest a work order JSON payload.
-    Equivalent to /work-orders/process but aligned with the ingest naming. Stored with doc_type='work_order'.
-    """
-    if not work_order_service:
-        raise HTTPException(status_code=503, detail="Work order service not initialized")
-    try:
-        return await work_order_service.process_work_order(payload)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        log_error(e, "/ingest/wo")
-        raise HTTPException(status_code=500, detail=f"Error ingesting work order: {str(e)}")
-
-
-@app.post("/ingest/inspection")
-async def ingest_inspection(payload: Dict[str, Any]):
-    """
-    Ingest an inspection JSON payload.
-    Summarizes it and stores into the organization's collection with doc_type='inspection'.
-    """
-    if not inspection_service:
-        raise HTTPException(status_code=503, detail="Inspection service not initialized")
-    try:
-        return await inspection_service.ingest(payload)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        log_error(e, "/ingest/inspection")
-        raise HTTPException(status_code=500, detail=f"Error ingesting inspection: {str(e)}")
-
-
-@app.post("/ingest/maintenance_request")
-async def ingest_maintenance_request(payload: Dict[str, Any]):
-    """
-    Ingest a maintenance request JSON payload.
-    Stored with doc_type='maintenance_request'.
-    """
-    if not maintenance_request_service:
-        raise HTTPException(status_code=503, detail="Maintenance request service not initialized")
-    try:
-        return await maintenance_request_service.ingest(payload)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        log_error(e, "/ingest/maintenance_request")
-        raise HTTPException(status_code=500, detail=f"Error ingesting maintenance request: {str(e)}")
-
-
-@app.post("/ingest/pm_schedules")
-async def ingest_pm_schedules(payload: Dict[str, Any]):
-    """
-    Ingest a preventive maintenance schedule JSON payload.
-    Stored with doc_type='pm_schedule'.
-    """
-    if not pm_schedule_service:
-        raise HTTPException(status_code=503, detail="PM schedule service not initialized")
-    try:
-        return await pm_schedule_service.ingest(payload)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        log_error(e, "/ingest/pm_schedules")
-        raise HTTPException(status_code=500, detail=f"Error ingesting PM schedule: {str(e)}")
 
 # ---------------------------------------------------------------------------------------
 # Collection inspection + search (per-company)
@@ -850,98 +644,6 @@ async def clear_all_chats():
             status_code=500,
             detail=f"Error clearing all chats: {str(e)}"
         )
-
-
-@app.get("/collections")
-async def list_collections():
-    """List all collections and their document counts.
-
-    Returns:
-        List of collections with names and document counts
-    """
-    try:
-        collections = vector_store.list_collections()
-        return {
-            "collections": collections,
-            "total_collections": len(collections)
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error listing collections: {str(e)}")
-
-
-@app.get("/collections/documents")
-async def view_documents(
-    collection_name: Optional[str] = None,
-    limit: int = 100,
-    offset: int = 0
-):
-    """View indexed documents in a collection with pagination.
-
-    Args:
-        collection_name: Optional collection name to view. If not provided, views default collection.
-        limit: Maximum number of documents to return (default 100, max 1000)
-        offset: Number of documents to skip for pagination (default 0)
-
-    Returns:
-        Paginated list of documents with their content and metadata
-
-    Example:
-        GET /collections/documents?collection_name=Oceanix&limit=50&offset=0
-        GET /collections/documents?collection_name=Oceanix&limit=50&offset=50
-    """
-    try:
-        # Validate limit
-        if limit > 1000:
-            raise HTTPException(status_code=400, detail="Limit cannot exceed 1000")
-        if limit < 1:
-            raise HTTPException(status_code=400, detail="Limit must be at least 1")
-        if offset < 0:
-            raise HTTPException(status_code=400, detail="Offset cannot be negative")
-
-        result = vector_store.view_documents(
-            collection_name=collection_name,
-            limit=limit,
-            offset=offset
-        )
-
-        # Check for errors in the result
-        if "error" in result:
-            raise HTTPException(status_code=500, detail=result["error"])
-
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error viewing documents: {str(e)}")
-
-
-@app.post("/collections/{collection_name}/purge")
-async def purge_collection(collection_name: str):
-    """Purge all documents from a collection without deleting the collection itself.
-
-    Args:
-        collection_name: Name of the collection to purge
-
-    Returns:
-        Status and count of deleted documents
-
-    Example:
-        POST /collections/Oceanix/purge
-    """
-    try:
-        result = vector_store.purge_collection(collection_name)
-
-        if not result["success"]:
-            if "not found" in result["message"]:
-                raise HTTPException(status_code=404, detail=result["message"])
-            else:
-                raise HTTPException(status_code=500, detail=result["message"])
-
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error purging collection: {str(e)}")
 
 
 @app.delete("/collections/{collection_name}")
