@@ -95,19 +95,23 @@ class VectorStore:
     #   Core store setup / connection
     # ---------------------------------------------------------------------- #
     def _initialize_store(self):
+        # Base collection for generic RAG (app-wide, not org-scoped)
         self._store = Milvus(
             embedding_function=self.embeddings,
             collection_name="context",
             connection_args={"uri": self.uri},
             auto_id=True,
-        )
+            # IMPORTANT: allow arbitrary metadata keys (no strict schema)
+            enable_dynamic_field=True,
+    )
         logger.debug(
             {
                 "message": "Milvus vector store initialized",
                 "uri": self.uri,
                 "collection": "context",
             }
-        )
+    )
+
 
     def default_collection_name(self) -> str:
         return "context"
@@ -116,7 +120,13 @@ class VectorStore:
         return "".join(c if c.isalnum() or c == "_" else "_" for c in name)
 
     def _get_store_for(self, collection_name: Optional[str] = None) -> Milvus:
-        """Return a langchain Milvus wrapper for the requested collection. Lazily creates if needed."""
+        """
+        Return a langchain Milvus wrapper for the requested collection.
+
+        Used for per-org collections like:
+        - org_83247135_6B56_4C33_8098_78634386BC3C
+        and any other custom collections.
+        """
         name = self.default_collection_name() if not collection_name else self._sanitize_collection(collection_name)
         if name in self._stores:
             return self._stores[name]
@@ -126,6 +136,8 @@ class VectorStore:
             collection_name=name,
             connection_args={"uri": self.uri},
             auto_id=True,
+            # IMPORTANT: allow arbitrary metadata (doc_type, work_order_id, inspection_id, etc.)
+            enable_dynamic_field=True,
         )
         self._stores[name] = store
         logger.debug({"message": "Milvus store ready", "collection": name})

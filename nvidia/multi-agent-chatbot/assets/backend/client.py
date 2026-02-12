@@ -47,6 +47,12 @@ class MCPClient:
                 "args": ["tools/mcp_servers/code_generation.py"],
                 "transport": "stdio",
             },
+            "rag-wo-server": {  
+            "command": "python",
+            "args": ["tools/mcp_servers/rag_wo.py"],  
+            "transport": "stdio",
+            },
+
             "rag-server": {
                 "command": "python",
                 "args": ["tools/mcp_servers/rag.py"],

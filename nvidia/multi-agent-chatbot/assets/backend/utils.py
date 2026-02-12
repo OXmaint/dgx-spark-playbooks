@@ -119,7 +119,7 @@ async def process_and_ingest_files_background(
 
         try:
             # Use fallback loader with improved error handling
-            documents = _fallback_load_documents(file_paths)
+            documents = _fallback_load_documents(file_paths, doc_type=doc_type)
 
             logger.debug({
                 "message": "Documents loaded, starting indexing",
@@ -266,7 +266,7 @@ def _fallback_load_documents(file_paths: List[str], doc_type: Optional[str] = No
                 "filename": src_name,
             }
             if doc_type:
-                md["type"] = doc_type
+                md["doc_type"] = doc_type
             md = clean_metadata(md)  # Clean even basic metadata
             
             content = (text or "").strip()

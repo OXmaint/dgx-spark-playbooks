@@ -1,338 +1,238 @@
+# work_order_service.py
 #
-# SPDX-FileCopyrightText: Copyright (c) 1993-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# Org-scoped Work Order service.
+#
+# Uses the shared VectorStore for all Milvus interaction:
+#   - Summarize the JSON work order
+#   - Store the summary as a Document with metadata (doc_type='work_order')
+#   - Search work orders per org
+#   - Basic org stats
 #
 
-"""Work Order Processing Service with Vector Storage"""
-
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List
 from langchain_core.documents import Document
-from work_order_summarizer import WorkOrderSummarizer
+
 from vector_store import VectorStore
 from logger import logger
-import json
-from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, utility
+
+from pymilvus import connections, utility, Collection
 
 
 class WorkOrderService:
-    """Service for processing and storing work orders per organization in Milvus"""
-    
-    def __init__(self, vector_store: VectorStore, summarizer: WorkOrderSummarizer):
-        """Initialize the work order service.
-        
+    """
+    Service for ingesting and searching work orders on a per-organization basis.
+
+    IMPORTANT:
+      - This service does NOT create Milvus collections or indexes directly.
+      - It delegates all schema/index management to the shared VectorStore.
+      - Collection name is derived from organization_id in a Milvus-safe way and
+        is shared with the other org-scoped doc types (inspection, etc.).
+    """
+
+    def __init__(self, vector_store: VectorStore, summarizer: Any):
+        """
         Args:
-            vector_store: VectorStore instance for storage (uses Milvus)
-            summarizer: WorkOrderSummarizer instance
+            vector_store: Shared VectorStore instance.
+            summarizer: WorkOrderSummarizer instance (must expose an async
+                        summarize_work_order(...) or summarize(...)).
         """
         self.vector_store = vector_store
         self.summarizer = summarizer
         self.milvus_uri = vector_store.uri
-        
+
+    # -------------------------------------------------------------------------
+    # Collection naming
+    # -------------------------------------------------------------------------
+
     def _get_collection_name(self, organization_id: str) -> str:
-        """Generate collection name from organization_id.
-        
-        Args:
-            organization_id: Organization identifier
-            
-        Returns:
-            Collection name (sanitized)
         """
-        # Sanitize collection name: only alphanumeric and underscores
-        sanitized = "".join(c if c.isalnum() or c == "_" else "_" for c in str(organization_id))
-        return f"org_{sanitized}_work_orders"
-    
-    def _ensure_collection_exists(self, organization_id: str) -> str:
-        """Ensure collection exists for organization, create if not.
-        
-        Args:
-            organization_id: Organization identifier
-            
-        Returns:
-            Collection name
+        Derive the Milvus collection name from organization_id.
+
+        We keep this consistent with OrgJsonIngestService and the MCP tools:
+          - Sanitize to [A-Za-z0-9_]
+          - Ensure first character is a letter or underscore by prefixing 'org_'
         """
-        try:
-            connections.connect(uri=self.milvus_uri)
-            collection_name = self._get_collection_name(organization_id)
-            
-            if utility.has_collection(collection_name):
-                logger.info({
-                    "message": "Collection already exists",
-                    "organization_id": organization_id,
-                    "collection_name": collection_name
-                })
-                connections.disconnect("default")
-                return collection_name
-            
-            # Create new collection with schema
-            fields = [
-                FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-                FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=2560),
-                FieldSchema(name="summary", dtype=DataType.VARCHAR, max_length=5000),
-                FieldSchema(name="organization_id", dtype=DataType.VARCHAR, max_length=200),
-                FieldSchema(name="work_order_id", dtype=DataType.VARCHAR, max_length=200),
-                FieldSchema(name="work_order_type_id", dtype=DataType.VARCHAR, max_length=200),
-                FieldSchema(name="work_order_number", dtype=DataType.VARCHAR, max_length=200),
-            ]
-            
-            schema = CollectionSchema(
-                fields=fields,
-                description=f"Work orders for organization {organization_id}"
-            )
-            
-            collection = Collection(name=collection_name, schema=schema)
-            
-            # Create index on vector field
-            index_params = {
-                "metric_type": "L2",
-                "index_type": "IVF_FLAT",
-                "params": {"nlist": 128}
-            }
-            collection.create_index(field_name="embedding", index_params=index_params)
-            
-            logger.info({
-                "message": "Created new collection for organization",
-                "organization_id": organization_id,
-                "collection_name": collection_name
-            })
-            
-            connections.disconnect("default")
-            return collection_name
-            
-        except Exception as e:
-            logger.error(f"Error ensuring collection exists: {e}", exc_info=True)
-            connections.disconnect("default")
-            raise
-    
+        base = "".join(
+            c if c.isalnum() or c == "_" else "_"
+            for c in str(organization_id)
+        )
+        if not base or not (base[0].isalpha() or base[0] == "_"):
+            base = "org_" + base
+        return base
+
+    # -------------------------------------------------------------------------
+    # Ingest
+    # -------------------------------------------------------------------------
+
     async def process_work_order(self, work_order: Dict[str, Any]) -> Dict[str, Any]:
-        """Process a work order: summarize and store in organization-specific collection.
-        
-        Required fields in work_order:
-        - organization_id
-        - work_order_id
-        - work_order_type_id
-        - work_order_number
-        
-        Args:
-            work_order: Work order JSON payload
-            
-        Returns:
-            Dict with summary, metadata, and status
         """
-        try:
-            # Extract required metadata fields
-            organization_id = work_order.get("organization_id")
-            work_order_id = work_order.get("work_order_id")
-            work_order_type_id = work_order.get("work_order_type_id")
-            work_order_number = work_order.get("work_order_number")
-            
-            # Validate required fields
-            if not all([organization_id, work_order_id, work_order_type_id, work_order_number]):
-                raise ValueError(
-                    "Missing required fields: organization_id, work_order_id, "
-                    "work_order_type_id, work_order_number"
-                )
-            
-            logger.info({
-                "message": "Processing work order",
-                "organization_id": organization_id,
-                "work_order_id": work_order_id
-            })
-            
-            # Ensure collection exists for this organization
-            collection_name = self._ensure_collection_exists(organization_id)
-            
-            # Generate summary using LLM
+        Summarize the work order JSON and store as a single summary document
+        in the per-org collection with doc_type='work_order'.
+        """
+        organization_id = work_order.get("organization_id")
+        if not organization_id:
+            raise ValueError("Missing required field: organization_id")
+
+        work_order_id = work_order.get("work_order_id") or work_order.get("id")
+        collection_name = self._get_collection_name(organization_id)
+
+        logger.info({
+            "message": "Processing work order",
+            "organization_id": organization_id,
+            "work_order_id": work_order_id,
+            "collection_name": collection_name,
+        })
+
+        # 1) Summarize using WorkOrderSummarizer
+        if hasattr(self.summarizer, "summarize_work_order"):
             summary = await self.summarizer.summarize_work_order(work_order)
-            
-            # Create embedding for the summary
-            embedding = self.vector_store.embeddings.embed_query(summary)
-            
-            # Store in Milvus
-            connections.connect(uri=self.milvus_uri)
-            collection = Collection(collection_name)
-            
-            data = [
-                [embedding],  # embedding vector
-                [summary],  # summary text
-                [str(organization_id)],  # organization_id
-                [str(work_order_id)],  # work_order_id
-                [str(work_order_type_id)],  # work_order_type_id
-                [str(work_order_number)]  # work_order_number
-            ]
-            
-            collection.insert(data)
-            collection.flush()
-            
-            connections.disconnect("default")
-            
-            logger.info({
-                "message": "Work order stored in Milvus",
-                "organization_id": organization_id,
-                "work_order_id": work_order_id,
-                "collection_name": collection_name,
-                "summary_length": len(summary)
-            })
-            
-            return {
-                "status": "success",
-                "organization_id": organization_id,
-                "work_order_id": work_order_id,
-                "collection_name": collection_name,
-                "summary": summary,
-                "metadata": {
-                    "organization_id": organization_id,
-                    "work_order_id": work_order_id,
-                    "work_order_type_id": work_order_type_id,
-                    "work_order_number": work_order_number
-                },
-                "message": f"Work order stored in collection '{collection_name}'"
-            }
-            
-        except Exception as e:
-            logger.error(f"Error processing work order: {e}", exc_info=True)
-            raise
-    
-    async def search_work_orders(
-        self, 
-        organization_id: str,
-        query: str, 
-        k: int = 5
-    ) -> List[Dict[str, Any]]:
-        """Search work orders within an organization by semantic similarity.
-        
-        Args:
-            organization_id: Organization to search within
-            query: Search query (will be embedded and compared)
-            k: Number of results to return
-            
-        Returns:
-            List of matching work orders with summaries and metadata
-        """
-        try:
-            collection_name = self._get_collection_name(organization_id)
-            
-            connections.connect(uri=self.milvus_uri)
-            
-            if not utility.has_collection(collection_name):
-                logger.warning(f"Collection {collection_name} does not exist")
-                connections.disconnect("default")
-                return []
-            
-            collection = Collection(collection_name)
-            collection.load()
-            
-            # Create embedding for query
-            query_embedding = self.vector_store.embeddings.embed_query(query)
-            
-            # Search
-            search_params = {"metric_type": "L2", "params": {"nprobe": 10}}
-            results = collection.search(
-                data=[query_embedding],
-                anns_field="embedding",
-                param=search_params,
-                limit=k,
-                output_fields=["summary", "organization_id", "work_order_id", 
-                              "work_order_type_id", "work_order_number"]
+        elif hasattr(self.summarizer, "summarize"):
+            summary = await self.summarizer.summarize(work_order)
+        else:
+            raise RuntimeError(
+                "WorkOrderSummarizer must expose summarize_work_order(...) or summarize(...)."
             )
-            
-            formatted_results = []
-            for hits in results:
-                for hit in hits:
-                    formatted_results.append({
-                        "score": hit.score,
-                        "summary": hit.entity.get("summary"),
-                        "metadata": {
-                            "organization_id": hit.entity.get("organization_id"),
-                            "work_order_id": hit.entity.get("work_order_id"),
-                            "work_order_type_id": hit.entity.get("work_order_type_id"),
-                            "work_order_number": hit.entity.get("work_order_number")
-                        }
-                    })
-            
-            connections.disconnect("default")
-            
-            logger.info({
-                "message": "Work order search completed",
-                "organization_id": organization_id,
-                "query": query,
-                "results_count": len(formatted_results)
-            })
-            
-            return formatted_results
-            
-        except Exception as e:
-            logger.error(f"Error searching work orders: {e}", exc_info=True)
-            connections.disconnect("default")
-            return []
-    
-    async def list_organizations(self) -> List[Dict[str, Any]]:
-        """List all organizations with work order collections.
-        
-        Returns:
-            List of organizations with their collection info
+
+        # 2) Metadata for VectorStore
+        metadata: Dict[str, Any] = {
+            "doc_type": "work_order",
+            "organization_id": str(organization_id),
+        }
+        if work_order_id:
+            metadata["work_order_id"] = str(work_order_id)
+
+        doc = Document(page_content=summary, metadata=metadata)
+
+        # 3) Index via VectorStore (no manual Milvus schema/index management)
+        self.vector_store.index_documents(
+            [doc],
+            no_split=True,      # 1 WO → 1 summary chunk
+            upsert_by_id=False, # no logical id-based upsert for now
+            collection_name=collection_name,
+        )
+
+        logger.info({
+            "message": "Work order stored via VectorStore",
+            "organization_id": organization_id,
+            "work_order_id": work_order_id,
+            "collection_name": collection_name,
+            "summary_length": len(summary),
+        })
+
+        return {
+            "status": "success",
+            "doc_type": "work_order",
+            "organization_id": organization_id,
+            "work_order_id": work_order_id,
+            "collection_name": collection_name,
+            "summary": summary,
+            "metadata": metadata,
+            "message": f"work_order stored in collection '{collection_name}'",
+        }
+
+    # -------------------------------------------------------------------------
+    # Search
+    # -------------------------------------------------------------------------
+
+    async def search_work_orders(
+        self,
+        organization_id: str,
+        query: str,
+        k: int = 5,
+    ) -> List[Dict[str, Any]]:
         """
-        try:
-            connections.connect(uri=self.milvus_uri)
-            
-            all_collections = utility.list_collections()
-            
-            org_collections = []
-            for coll_name in all_collections:
-                if coll_name.startswith("org_") and coll_name.endswith("_work_orders"):
-                    collection = Collection(coll_name)
-                    org_id = coll_name.replace("org_", "").replace("_work_orders", "")
-                    
-                    org_collections.append({
-                        "organization_id": org_id,
-                        "collection_name": coll_name,
-                        "work_order_count": collection.num_entities
-                    })
-            
-            connections.disconnect("default")
-            
-            return org_collections
-            
-        except Exception as e:
-            logger.error(f"Error listing organizations: {e}", exc_info=True)
-            connections.disconnect("default")
-            return []
-    
-    async def get_organization_stats(self, organization_id: str) -> Dict[str, Any]:
-        """Get statistics for an organization's work orders.
-        
-        Args:
-            organization_id: Organization identifier
-            
-        Returns:
-            Statistics dictionary
+        Semantic search over work order summaries for a single organization.
         """
+        collection_name = self._get_collection_name(organization_id)
+
+        logger.info({
+            "message": "Searching work orders",
+            "organization_id": organization_id,
+            "collection_name": collection_name,
+            "query": query,
+            "k": k,
+        })
+
+        docs = self.vector_store.get_documents(
+            query=query,
+            k=k,
+            collection_name=collection_name,
+        )
+
+        results: List[Dict[str, Any]] = []
+        for d in docs:
+            md = d.metadata or {}
+            # Filter defensively by doc_type
+            if md.get("doc_type") not in (None, "work_order"):
+                continue
+            results.append(
+                {
+                    "text": d.page_content,
+                    "metadata": md,
+                }
+            )
+
+        logger.info({
+            "message": "Work order search completed",
+            "organization_id": organization_id,
+            "collection_name": collection_name,
+            "query": query,
+            "returned": len(results),
+        })
+
+        return results
+
+    # -------------------------------------------------------------------------
+    # Org discovery / stats
+    # -------------------------------------------------------------------------
+
+    async def list_organizations(self) -> List[str]:
+        """
+        List all organizations that have a per-org collection (any doc_type)
+        that matches this naming pattern.
+        """
+        orgs: List[str] = []
+        connections.connect(uri=self.milvus_uri)
         try:
-            collection_name = self._get_collection_name(organization_id)
-            
-            connections.connect(uri=self.milvus_uri)
-            
-            if not utility.has_collection(collection_name):
+            cols = utility.list_collections()
+            for name in cols:
+                # We treat any collection whose name starts with 'org_' as an org-scoped collection
+                if name.startswith("org_"):
+                    orgs.append(name)
+        finally:
+            try:
                 connections.disconnect("default")
+            except Exception:
+                pass
+
+        return orgs
+
+    async def get_organization_stats(self, organization_id: str) -> Dict[str, Any]:
+        """
+        Basic stats for an organization's collection (entity count).
+        """
+        collection_name = self._get_collection_name(organization_id)
+        connections.connect(uri=self.milvus_uri)
+        try:
+            if not utility.has_collection(collection_name):
                 return {
                     "organization_id": organization_id,
+                    "collection": collection_name,
                     "exists": False,
-                    "work_order_count": 0
                 }
-            
-            collection = Collection(collection_name)
-            
-            stats = {
+
+            c = Collection(collection_name)
+            c.load()
+            num_entities = c.num_entities
+
+            return {
                 "organization_id": organization_id,
-                "collection_name": collection_name,
+                "collection": collection_name,
                 "exists": True,
-                "work_order_count": collection.num_entities
+                "num_entities": num_entities,
             }
-            
-            connections.disconnect("default")
-            
-            return stats
-            
-        except Exception as e:
-            logger.error(f"Error getting organization stats: {e}", exc_info=True)
-            connections.disconnect("default")
-            return {}
+        finally:
+            try:
+                connections.disconnect("default")
+            except Exception:
+                pass
